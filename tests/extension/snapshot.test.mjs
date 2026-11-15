@@ -89,3 +89,29 @@ test("loadingTwiceIsSafe", async () => {
   const w = loadContent(BASIC, ["extension/content/snapshot.js", "extension/content/snapshot.js"]);
   assert.equal(w.SC.snapshot("interactive").split("\n").length, 3);
 });
+
+function shadowAndFrame() {
+  const w = loadContent(`<div id="h"></div><iframe id="f"></iframe>`);
+  w.document.getElementById("h").attachShadow({ mode: "open" }).innerHTML = "<button>InShadow</button>";
+  w.document.getElementById("f").contentDocument.body.innerHTML = "<button>InFrame</button>";
+  w.SC.snapshot("interactive");
+  return w;
+}
+
+test("resolveReachesShadowAndIframeElements", () => {
+  const w = shadowAndFrame();
+  assert.equal(w.SC.resolve("e1").textContent, "InShadow");
+  assert.equal(w.SC.resolve("e2").textContent, "InFrame");
+});
+
+test("resolveNullAfterShadowHostRemoved", () => {
+  const w = shadowAndFrame();
+  w.document.getElementById("h").remove();
+  assert.equal(w.SC.resolve("e1"), null);
+});
+
+test("resolveNullAfterIframeRemoved", () => {
+  const w = shadowAndFrame();
+  w.document.getElementById("f").remove();
+  assert.equal(w.SC.resolve("e2"), null);
+});

@@ -133,9 +133,22 @@
   SC.snapshot = (filter = "interactive") =>
     collect(filter).map((e) => "  ".repeat(e.depth) + e.line).join("\n");
 
+  function isLive(el) {
+    if (!el.isConnected) return false;
+    let win = el.ownerDocument.defaultView;
+    while (win) {
+      let frame;
+      try { frame = win.frameElement; } catch { return false; }
+      if (!frame) return true;
+      if (!frame.isConnected) return false;
+      win = frame.ownerDocument.defaultView;
+    }
+    return false;
+  }
+
   SC.resolve = (ref) => {
     const el = refs.get(ref)?.deref();
-    return el && el.isConnected ? el : null;
+    return el && isLive(el) ? el : null;
   };
 
   SC.find = (query) => {
