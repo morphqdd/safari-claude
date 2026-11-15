@@ -23,7 +23,7 @@ Talk to Claude without a terminal. Open the chat with the Safari Agent toolbar b
 
 - Risky clicks and new sites ask for confirmation with a card in the chat.
 - Stop in the chat or on the page badge halts the current task, including one started from a terminal.
-- The conversation continues until "New chat" and survives a Safari restart. Claude Code exits after 5 minutes without messages.
+- The conversation continues until you start a new chat and survives a Safari restart. Claude Code exits after 5 minutes without messages.
 - If Claude Code in a terminal is already driving Safari, the chat reports that Safari is busy.
 
 ## Safety
