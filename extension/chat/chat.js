@@ -11,21 +11,34 @@
   const LABELS = Object.fromEntries([...SITE, ...OTHER]);
   const TITLE = { site: "Открыть сайт", click: "Нажать", type: "Ввести текст", key: "Нажать клавишу" };
 
-  const hostOf = (u) => { try { return new URL(u).hostname; } catch { return String(u ?? ""); } };
+  const hostOf = (u) => {
+    try { return new URL(u).hostname; } catch { return String(u ?? "").slice(0, 60); }
+  };
   const quoted = (s) => `«${s}»`;
+  const HISTORY = { back: "назад", forward: "вперёд", reload: "обновил страницу" };
+  const FIXED = {
+    tabs_list: "посмотрел вкладки",
+    tab_select: "выбрал вкладку",
+    read_page: "прочитал страницу",
+    get_text: "прочитал текст",
+    scroll: "прокрутил",
+    screenshot: "сделал снимок",
+    wait: "подождал",
+    confirm_action: "запросил подтверждение",
+  };
 
   // Short Russian line for an action; unknown tools fall back to the bare tool name.
   function describe(tool, input = {}) {
     const t = String(tool).replace(/^mcp__safari__/, "");
-    const ref = input.ref ?? input.element ?? "";
+    const i = input ?? {};
+    if (t in FIXED) return FIXED[t];
     switch (t) {
-      case "navigate": return `открыл ${hostOf(input.url)}`;
-      case "click": return `нажал ${ref}`.trim();
-      case "type": return `ввёл ${quoted(input.text ?? "")}`;
-      case "key": return `нажал клавишу ${input.combo ?? input.key ?? ""}`.trim();
-      case "scroll": return "прокрутил страницу";
-      case "snapshot": return "посмотрел страницу";
-      case "screenshot": return "сделал снимок";
+      case "tab_create": return `открыл новую вкладку ${hostOf(i.url)}`.trim();
+      case "navigate": return HISTORY[i.action] ?? `открыл ${hostOf(i.url)}`;
+      case "find": return `искал ${quoted(i.query ?? "")}`;
+      case "click": return `нажал ${i.ref ?? ""}`.trim();
+      case "type": return `ввёл текст в ${i.ref ?? ""}`.trim();
+      case "key": return `нажал ${i.combo ?? ""}`.trim();
       default: return t;
     }
   }
@@ -45,10 +58,17 @@
     const setWaiting = (v) => { waiting = v; send.disabled = v; };
     const stick = () => { log.scrollTop = log.scrollHeight; };
 
+    // Assistant text is Markdown (built as DOM nodes only); every other kind stays plain text.
+    function fill(el, kind, text) {
+      if (kind === "assistant" && globalThis.SCMarkdown) {
+        el.textContent = "";
+        el.appendChild(globalThis.SCMarkdown.render(doc, text));
+      } else el.textContent = text;
+    }
     function line(kind, text) {
       const el = doc.createElement("div");
       el.className = kind;
-      el.textContent = text;
+      fill(el, kind, text);
       log.appendChild(el);
       stick();
       return el;
@@ -159,7 +179,7 @@
             currentEl = line("assistant", "");
           }
           current.text += String(m.text ?? "");
-          currentEl.textContent = current.text;
+          fill(currentEl, "assistant", current.text);
           stick();
           break;
         case "action": add("action", `· ${describe(m.tool, m.input)}`); break;

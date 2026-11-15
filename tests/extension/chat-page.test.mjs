@@ -11,6 +11,7 @@ async function page(stored, { timers, connect } = {}) {
   const dom = new JSDOM(html, { runScripts: "outside-only", url: "safari-web-extension://ABCD/chat/chat.html" });
   const w = dom.window;
   if (timers) w.setTimeout = (f, ms) => void timers.push({ f, ms });
+  w.eval(readFileSync("extension/chat/markdown.js", "utf8"));
   w.eval(readFileSync("extension/chat/chat.js", "utf8"));
   const store = stored ? { "sc.chat": j(stored) } : {};
   const sent = [];
@@ -297,4 +298,47 @@ test("sendDuringReconnectGapShowsError", async () => {
   assert.match(p.$(".user").textContent, /привет/);
   assert.match(p.$(".error").textContent, /Связь с расширением прервалась/);
   assert.equal(p.$("#send").disabled, false);
+});
+
+test("assistantEntryUsesMarkdownUserEntryDoesNot", async () => {
+  const p = await page();
+  await p.push({ type: "delta", text: "Вот **важно**" });
+  await p.push({ type: "delta", text: " и\n\n- пункт" });
+  assert.equal(p.d.querySelectorAll(".assistant").length, 1);
+  assert.equal(p.$(".assistant strong").textContent, "важно");
+  assert.equal(p.$(".assistant li").textContent, "пункт");
+  await p.push({ type: "turnEnd" });
+  assert.equal(p.store["sc.chat"].entries[0].text, "Вот **важно** и\n\n- пункт");
+  await p.type("**не жирный**");
+  p.key("Enter");
+  await tick();
+  assert.equal(p.$(".user").textContent, "**не жирный**");
+  assert.equal(p.$(".user strong"), null);
+});
+
+test("actionLinesAreRussianForAllTools", async () => {
+  const table = [
+    ["tabs_list", {}, "· посмотрел вкладки"],
+    ["tab_create", { url: "https://example.com/x" }, "· открыл новую вкладку example.com"],
+    ["tab_select", { tab: 3 }, "· выбрал вкладку"],
+    ["navigate", { url: "https://example.com/x" }, "· открыл example.com"],
+    ["navigate", { action: "back" }, "· назад"],
+    ["navigate", { action: "forward" }, "· вперёд"],
+    ["navigate", { action: "reload" }, "· обновил страницу"],
+    ["read_page", {}, "· прочитал страницу"],
+    ["find", { query: "кнопка" }, "· искал «кнопка»"],
+    ["get_text", {}, "· прочитал текст"],
+    ["click", { ref: "e12" }, "· нажал e12"],
+    ["type", { ref: "e3", text: "секрет" }, "· ввёл текст в e3"],
+    ["key", { combo: "Enter" }, "· нажал Enter"],
+    ["scroll", {}, "· прокрутил"],
+    ["screenshot", {}, "· сделал снимок"],
+    ["wait", {}, "· подождал"],
+    ["confirm_action", {}, "· запросил подтверждение"],
+    ["weird_tool", {}, "· weird_tool"],
+  ];
+  const p = await page();
+  for (const [tool, input] of table) await p.push({ type: "action", tool: `mcp__safari__${tool}`, input });
+  const got = [...p.d.querySelectorAll(".action")].map((e) => e.textContent);
+  assert.deepEqual(got, table.map((r) => r[2]));
 });
