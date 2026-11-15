@@ -1,0 +1,9 @@
+{
+  "manifest_version": 2,
+  "name": "SC Persist Spike",
+  "version": "0.0.1",
+  "description": "Throwaway: does a persistent MV2 background page keep a WebSocket open?",
+  "permissions": ["tabs", "<all_urls>"],
+  "background": { "scripts": ["background.js"], "persistent": true },
+  "browser_action": { "default_title": "SC Persist Spike" }
+}
