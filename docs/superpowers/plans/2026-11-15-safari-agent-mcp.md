@@ -4,7 +4,7 @@
 
 **Goal:** Claude Code (subscription) drives the owner's real Safari through an MCP server named `safari`: it reads pages, clicks, types, scrolls, navigates and takes screenshots in its own tabs, and a visible "Claude" cursor and status bar show what it is doing.
 
-**Architecture:** A Swift helper binary has two modes. `daemon` is started on demand by launchd socket activation on `127.0.0.1:47821`, speaks WebSocket and does Accessibility (AX) actions. `mcp` is a stdio MCP server that Claude Code spawns; it proxies tool calls to the daemon. A Safari Web Extension (MV3) connects to the daemon over WebSocket. Its content script snapshots pages, maps `ref` ↔ DOM ↔ AX, runs DOM fallbacks and draws the overlay. A minimal Xcode container app hosts the extension.
+**Architecture:** A Swift helper binary has two modes. `daemon` is started on demand by launchd socket activation on `127.0.0.1:47821`, speaks WebSocket and does Accessibility (AX) actions. `mcp` is a stdio MCP server that Claude Code spawns; it proxies tool calls to the daemon. A Safari Web Extension (Manifest V2, persistent background page — spike result, spec §5) keeps one WebSocket open to the daemon while Safari runs. Its content script snapshots pages, maps `ref` ↔ DOM ↔ AX, runs DOM fallbacks and draws the overlay. A minimal Xcode container app hosts the extension.
 
 **Tech Stack:** Swift 6.3 / SwiftPM / swift-testing; ApplicationServices (AX), CoreGraphics (CGEvent, CGWindowList), CryptoKit; plain JavaScript (classic scripts, no bundler); Node `node:test` + `jsdom` for extension tests; Xcode 27.2 `safari-web-extension-converter`.
 
@@ -17,10 +17,10 @@
 - The helper **never** calls `NSRunningApplication.activate`, AppleScript `activate`, sets `kAXFocusedAttribute`, or writes `kAXValueAttribute` (spec §5).
 - Keys are posted to the Safari process (`CGEvent.postToPid`) **only when Safari is not frontmost** and the agent tab is active in its window. Otherwise the DOM path is used (spec §7.3).
 - The agent never activates tabs or windows. Agent tabs are created with `tabs.create({ active: false })` (spec §7.5).
-- Idle means zero: no timers, observers or sockets in the content script or service worker unless a task is running. The daemon has no `RunAtLoad`/`KeepAlive` and exits after **600 s** with no connections and no in-flight requests.
+- Idle means zero CPU: no timers, observers or pings. The content script registers only a message listener. The persistent background page holds one silent WebSocket (no pings; its only timer is reconnect-after-drop, backoff 1 s → 2 s → 5 s → 15 s → 30 s cap). The daemon has no `RunAtLoad`/`KeepAlive`, sends no pings, and exits after **600 s** with no connections and no in-flight requests (in practice: after Safari quits).
 - Daemon listens on `127.0.0.1` only, port **47821**. launchd label `dev.morphqdd.safari-claude`, socket name `Listener`.
 - Paths: helper binary `~/.local/bin/safari-claude-helper`. Support dir `~/Library/Application Support/SafariClaude/` (file `token`, mode 0600). Plist `~/Library/LaunchAgents/dev.morphqdd.safari-claude.plist`.
-- Auth (deviation from spec §8, decided here; spec updated in Task 1): the `mcp` client must send the token. The extension is authenticated by `Origin` starting with `safari-web-extension://`, pinned trust-on-first-use to the first such origin, which is stored in `<support>/extension-origin`. This avoids App Groups (free account) and a cross-container TCC prompt. Web pages cannot forge `Origin`.
+- Auth (spec §8): the `mcp` client must send the token. The extension is accepted when its `Origin` starts with `safari-web-extension://` (not pinned: the uuid changes on every extension reload). Web pages cannot forge `Origin`.
 - MCP server name `safari`, so tools appear as `mcp__safari__<tool>`.
 - Owner-facing strings in the overlay are in Russian.
 - Free Apple Personal Team: no App Groups. Sign the helper with the "Apple Development" identity if present, ad-hoc otherwise with a warning.
@@ -29,7 +29,7 @@
 
 1. **Owner types in Safari while the agent types**: no CGEvents may be posted while Safari is frontmost. The text goes in through the DOM. Test: Task 8 `typeUsesDomWhenSafariFrontmost`.
 2. **Page changed between `read_page` and `click`** (navigation, re-render): a stale `ref` must return `not_found` with "call read_page again", not click something else. Test: Task 10 `prepareStaleRefReturnsNotFound`.
-3. **Extension asleep or disconnected when a tool is called**: wake, wait at most 3 s, then fail with `no_extension`. Never hang. Test: Task 5 `extensionRequestFailsFastWhenAbsent`.
+3. **Extension not connected when a tool is called** (Safari closed, extension disabled, reconnect in progress): wait at most 3 s for it, then fail with `no_extension`. Never hang. Test: Task 5 `extensionRequestFailsFastWhenAbsent`.
 4. **Cyrillic and emoji text**: UTF-16 surrogate pairs must stay in one event. Test: Task 6 `chunksKeepSurrogatePairs`.
 5. **Elements inside open shadow roots and same-origin iframes**: `read_page` and actions must reach them. Test: Task 9 `snapshotIncludesShadowAndIframe`.
 
@@ -77,9 +77,13 @@ Error codes: `busy`, `no_extension`, `no_agent_tab`, `site_not_allowed`, `risky_
 
 **extension → daemon:** event `stop` `{}`, sent when the owner presses «Стоп».
 
+**daemon → extension:** event `idle` `{}` when the busy lock is released; the extension hides the overlay (`overlay.status(null)` in the agent tab) and keeps the socket open.
+
 ---
 
-### Task 1: Risk spike — waking the extension, keep-alive, capture, AX class lookup
+### Task 1: Risk spike — waking the extension, keep-alive, capture, AX class lookup ✅ DONE
+
+Done 2026-11-15. Results: `spikes/wake/RESULTS.md` and spec §5. Decisions: MV2 persistent background page (no wake needed), class markers `__sc_m_<ref>`, capture fallback not needed, origin not pinned, AX windows always scanned privately and matched by URL. The steps below are kept for the record.
 
 This is a throwaway spike. It decides which wake strategy Task 11 implements and updates the spec. Build it in `spikes/wake/`. It is committed for the record but not used by later tasks.
 
@@ -123,7 +127,7 @@ git commit -m "spike: extension wake/keep-alive, capture, AX class lookup result
   - `enum Role: String, Codable { case extension_ = "extension", mcp }`
   - `indirect enum JSON: Codable, Equatable`: null/bool/number/string/array/object, with subscripts `json["key"]` and accessors `.string`, `.int`, `.bool`.
   - `struct RPCError: Codable, Equatable, Error { code: String; message: String }`, plus static constructors for each error code, e.g. `.busy`, `.noExtension`.
-  - `struct Paths { static var support: URL; static var token: URL; static var extensionOrigin: URL; static var plist: URL; static var installedBinary: URL }`. A test override is possible via `Paths.root` (defaults to the home directory).
+  - `struct Paths { static var support: URL; static var token: URL; static var plist: URL; static var installedBinary: URL }`. A test override is possible via `Paths.root` (defaults to the home directory).
   - `final class Auth { init(paths: Paths.Type = Paths.self); func loadOrCreateToken() throws -> String; func authorize(hello: Message, origin: String?) -> Bool }`
 
 - [ ] **Step 1: Write failing tests**
@@ -131,7 +135,7 @@ git commit -m "spike: extension wake/keep-alive, capture, AX class lookup result
   - `resWithErrorDecodes`: `{"type":"res","id":3,"error":{"code":"busy","message":"x"}}` → `.res(id: 3, result: nil, error: RPCError(code: "busy", message: "x"))`.
   - `tokenCreatedWith0600AndStable`: two calls return the same 64-hex-char string, and the file permissions are `0o600`.
   - `mcpRequiresToken`: an mcp hello with the wrong token → false; with the right token → true.
-  - `extensionOriginPinnedOnFirstUse`: the first origin `safari-web-extension://AAA` → true and is persisted; `safari-web-extension://BBB` → false; `https://evil.com` → false; `nil` → false.
+  - `extensionOriginAccepted`: `safari-web-extension://aaa` → true; `safari-web-extension://bbb` → true; `https://evil.com` → false; `nil` → false.
 - [ ] **Step 2: Run** `cd helper && swift test`. Expected: compile failures, because the types are not defined yet.
 - [ ] **Step 3: Implement** `Messages.swift`, `Paths.swift`, `Auth.swift`. The token is 32 bytes from `SecRandomCopyBytes`, hex-encoded.
 - [ ] **Step 4: Run** `swift test`. Expected: all pass.
@@ -179,10 +183,10 @@ git commit -m "spike: extension wake/keep-alive, capture, AX class lookup result
 - Produces:
   - `protocol Actuator { func press(marker: String, pageURL: String) throws; func isSafariFrontmost() -> Bool }`. Task 6 adds `postText` and `postCombo` to this protocol.
   - `final class AXActuator: Actuator`
-  - `SafariLocator.windows() -> [AXElement]`: public `kAXWindowsAttribute` first. If empty, fall back to the private `_AXUIElementCreateWithRemoteToken` scan, with ids `0..<3000` and token layout `pid:Int32, 0:Int32, 0x636f636f:Int32, id:UInt64`, keeping role `AXWindow`.
+  - `SafariLocator.windows() -> [AXElement]`: **always** the union of public `kAXWindowsAttribute` and the private `_AXUIElementCreateWithRemoteToken` scan (ids `0..<3000`, token layout `pid:Int32, 0:Int32, 0x636f636f:Int32, id:UInt64`, role `AXWindow`), deduplicated with `CFEqual`. The spike showed that the public list can contain only a non-browser window.
   - `SafariLocator.webArea(url: String) -> AXElement?`: the `AXWebArea` whose `AXURL` absolute string equals `url`.
   - `Frontmost.isSafari() -> Bool`: the first `CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)` entry with `kCGWindowLayer == 0` has `kCGWindowOwnerPID == safariPid`. Do not use `NSWorkspace.frontmostApplication` (spec §5: stale without a run loop).
-  - `press` throws `RPCError.notFound` when no web area or element matches. It finds the element by `AXDOMClassList` containing `marker`, or by `AXDOMIdentifier == marker` if Task 1 chose ids, with a depth limit of 60.
+  - `press` throws `RPCError.notFound` when no web area or element matches. It finds the element by `AXDOMClassList` containing `marker`, with a depth limit of 60.
 
 - [ ] **Step 1: Write the live test** `pressesMarkedButtonWithoutActivating`. Serve `tests/fixtures/events.html` via `python3 -m http.server`, with the owner's tab open and Terminal frontmost. Add the marker via the fixture's `?mark=btn` query, where the fixture JS adds class `__sc_m_live` to `#btn`. Call `press(marker: "__sc_m_live", pageURL:)`. Assert the log gains `click` with `isTrusted:true` and `Frontmost.isSafari() == false` before and after.
 - [ ] **Step 2: Run** `SC_LIVE_AX=1 swift test --filter AXLive`. Expected: FAIL (not implemented).
@@ -203,7 +207,7 @@ git commit -m "spike: extension wake/keep-alive, capture, AX class lookup result
 - Consumes: `Message`, `RPCError`, `Auth`, `WSConnection`/`Listener` (Tasks 2–3).
 - Produces:
   - `protocol Connection: AnyObject { var origin: String? { get }; var onText: ((String) -> Void)? { get set }; var onClose: (() -> Void)? { get set }; func send(_ text: String); func close(code: UInt16) }`. `WSConnection` conforms; tests use `FakeConnection`.
-  - `final class ExtensionLink { func request(_ method: String, _ params: JSON, timeout: TimeInterval = 15) async throws -> JSON; var isConnected: Bool; var waker: (() -> Void)? }`. If not connected, it calls `waker` and waits up to **3 s** for a connection, then throws `.noExtension`.
+  - `final class ExtensionLink { func request(_ method: String, _ params: JSON, timeout: TimeInterval = 15) async throws -> JSON; var isConnected: Bool }`. If not connected, it waits up to **3 s** for a connection, then throws `.noExtension` with message `Safari не запущен или расширение «Safari Agent» выключено`.
   - `protocol ToolHandling { func call(name: String, arguments: JSON, link: ExtensionLink) async throws -> JSON }` (implemented in Task 8).
   - `final class Daemon { init(auth: Auth, tools: ToolHandling, idleExit: TimeInterval = 600, lockIdle: TimeInterval = 120, exit: @escaping () -> Void = { Foundation.exit(0) }); func accept(_ c: Connection) }`
   - Busy lock: the first mcp connection to send `tool.call` owns the lock. Other mcp connections get `busy`. The lock is released on owner disconnect or after `lockIdle` with no calls.
@@ -214,7 +218,7 @@ git commit -m "spike: extension wake/keep-alive, capture, AX class lookup result
   - `routesToolCallToHandler`: an mcp `req tool.call` → `res` with the handler result and the same id.
   - `secondClientGetsBusy`: client A calls, client B calls → B gets error `busy`.
   - `stopCancelsInFlight`: the handler suspends, the extension sends event `stop` → A gets `cancelled`.
-  - `extensionRequestFailsFastWhenAbsent`: `link.request` with no extension connected → `noExtension` within 3.5 s, and `waker` was called once.
+  - `extensionRequestFailsFastWhenAbsent`: `link.request` with no extension connected → `noExtension` within 3.5 s; if the extension connects after 1 s, the request is delivered instead.
   - `idleExitAfterNoConnections`: with `idleExit: 0.2`, no connections → `exit` is called; with one open connection → not called.
 - [ ] **Step 2: Run** `swift test --filter Daemon`. Expected: FAIL.
 - [ ] **Step 3: Implement.** All state lives on one serial queue. `ExtensionLink` correlates by `id`.
@@ -285,7 +289,7 @@ git commit -m "spike: extension wake/keep-alive, capture, AX class lookup result
 
 **Files:**
 - Create: `helper/Sources/HelperCore/Tools/ToolRunner.swift`
-- Modify: `helper/Sources/safari-claude-helper/main.swift` (`daemon` wires `ToolRunner(actuator: AXActuator())`, and `link.waker` per Task 1's strategy: W1 → `actuator.postCombo(.wake)` with `KeyCombo.wake = Ctrl+Shift+Alt+Y`; W2 → nil)
+- Modify: `helper/Sources/safari-claude-helper/main.swift` (`daemon` wires `ToolRunner(actuator: AXActuator())`)
 - Test: `helper/Tests/HelperCoreTests/ToolRunnerTests.swift`
 
 **Interfaces:**
@@ -363,7 +367,7 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
 **Interfaces:**
 - Consumes: `SC.resolve` (Task 9). `SC.overlay` (Task 12) is optional: guard with `SC.overlay?.…` so this task tests standalone.
 - Produces:
-  - `SC.prepare(ref, action) -> Promise<{marker, risk}>`. Throws `{code:"not_found", message:"Element <ref> is gone; call read_page again"}` if `resolve` is null. Then `scrollIntoView({block:"center"})`, then `await SC.overlay?.moveTo(el)`. Adds class `__sc_m_<ref>` (or a temporary `id` per Task 1).
+  - `SC.prepare(ref, action) -> Promise<{marker, risk}>`. Throws `{code:"not_found", message:"Element <ref> is gone; call read_page again"}` if `resolve` is null. Then `scrollIntoView({block:"center"})`, then `await SC.overlay?.moveTo(el)`. Adds class `__sc_m_<ref>`.
   - `SC.release(ref)` (removes the marker, `SC.overlay?.pulse()`)
   - `SC.domClick(ref)` (dispatches `pointerdown`, `mousedown`, `pointerup`, `mouseup`, `click` with element-centre `clientX/Y`, `bubbles`, `composed`)
   - `SC.focus(ref) -> boolean`
@@ -391,28 +395,26 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
 
 ---
 
-### Task 11: Extension shell — manifest, service worker, content dispatcher
+### Task 11: Extension shell — manifest, persistent background page, content dispatcher
 
 **Files:**
 - Create: `extension/manifest.json`, `extension/background.js`, `extension/bg/link.js`, `extension/bg/handlers.js`, `extension/content/main.js`, `extension/icons/` (16/32/48/128 px, simple orange arrow)
 - Test: `tests/extension/handlers.test.mjs`
 
 **Interfaces:**
-- Consumes: the content `SC.*` API (Tasks 9–10, 12), the Shared Protocol, and Task 1's wake strategy.
+- Consumes: the content `SC.*` API (Tasks 9–10, 12), the Shared Protocol.
 - Produces:
-  - Manifest (MV3):
-    - name `Safari Agent`; permissions `tabs`, `storage`, `alarms`, `scripting`; `host_permissions ["<all_urls>"]`.
-    - `background.service_worker = "background.js"`.
+  - Manifest (**MV2**, spike result):
+    - `manifest_version: 2`; name `Safari Agent`; permissions `tabs`, `storage`, `<all_urls>`.
+    - `background: { scripts: ["bg/link.js", "bg/handlers.js", "background.js"], persistent: true }`.
     - Content scripts on `<all_urls>`, `all_frames: true`, `run_at: document_idle`, files `content/snapshot.js`, `content/risk.js`, `content/sites.js`, `content/overlay.js`, `content/actions.js`, `content/main.js`.
-    - `action` with title `Safari Agent — подключить`; `commands.sc-wake` (suggested `MacCtrl+Shift+Alt+Y`).
-  - `background.js` = `importScripts("bg/link.js", "bg/handlers.js")` plus wiring.
-    - Connect triggers: `commands.onCommand("sc-wake")`, `action.onClicked`, `runtime.onStartup` **only if** `storage.session` `sc.sessionActive` is set, and `alarms "sc-reconnect"` (1 min, created on connect, cleared on daemon event `idle`).
-    - On connect it sets `sc.sessionActive`. On `idle` it clears it and closes the socket.
-  - `SCLink` (bg/link.js): `connect()`, `onRequest(method, params) -> Promise<result>`, `sendEvent(name, data)`. Opens `ws://127.0.0.1:47821`, sends `hello{role:"extension"}`, has no timers of its own besides the alarm.
+    - `browser_action` with title `Safari Agent`. No `commands`, no `alarms`.
+  - `background.js` wiring: on load `SCLink.connect()`. On close, reconnect with backoff 1 s → 2 s → 5 s → 15 s → 30 s (cap), reset to 1 s after a successful `welcome`. The daemon event `idle` → `sendToTab(agentTab, {method:"overlay.status", params:{text:null}})`, and the socket stays open.
+  - `SCLink` (bg/link.js): `connect()`, `onRequest(method, params) -> Promise<result>`, `sendEvent(name, data)`, `onEvent(name, data)`. Opens `ws://127.0.0.1:47821` and sends `hello{role:"extension"}`. No pings and no timers besides the reconnect backoff.
   - `SCHandlers.handle(method, params, deps) -> Promise<result>` (bg/handlers.js):
-    - `deps = {browser, sendToTab(tabId, msg)}`. The agent tab id lives in `storage.session` key `sc.agentTab`.
+    - `deps = {browser, sendToTab(tabId, msg), state}`. `state.agentTab` is held in memory (the page is persistent) and cleared on `tabs.onRemoved` of that tab.
     - Tab methods use the `browser.tabs` API. `tabs.create` → `{active:false}` next to the active tab (`index: active.index + 1`).
-    - Page/el/overlay methods → `sendToTab(agentTab, {method, params})`. If that rejects with "no receiver", inject the content files via `scripting.executeScript` and retry once.
+    - Page/el/overlay methods → `sendToTab(agentTab, {method, params})`. If that rejects with "no receiver", inject the content files with `tabs.executeScript(tabId, {file, allFrames:true})` in manifest order, then retry once.
     - `tab.screenshot` → `tabs.captureVisibleTab(windowId, {format:"png"})` only when the agent tab is active in its window, else `background_tab`.
     - The `navigate` result waits for `tabs.onUpdated status:"complete"` (timeout 30 s).
     - Missing agent tab → `no_agent_tab`.
@@ -423,11 +425,13 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
   - `createIsBackgroundNextToActive`: `tabs.create` called with `{active:false, index: activeIndex+1}`, and `sc.agentTab` is set.
   - `noAgentTabError`: `page.snapshot` with no agent tab → code `no_agent_tab`.
   - `screenshotBackgroundTab`: agent tab `active:false` → `background_tab`, and `captureVisibleTab` not called.
-  - `reinjectsOnNoReceiver`: the first `sendToTab` rejects "Could not establish connection" → `executeScript` is called and the retry succeeds.
+  - `reinjectsOnNoReceiver`: the first `sendToTab` rejects "Could not establish connection" → `tabs.executeScript` is called for each content file and the retry succeeds.
+  - `agentTabClearedOnRemove`: after `tabs.onRemoved(agentTab)`, `page.snapshot` → `no_agent_tab`.
+  - `reconnectBackoff`: consecutive closes schedule reconnects at 1000, 2000, 5000, 15000, 30000, 30000 ms (fake timers); a `welcome` resets to 1000.
 - [ ] **Step 2: Run** `npm run test:ext`. Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run.** Expected: PASS.
-- [ ] **Step 5: Commit** `feat(ext): manifest, service worker link and handlers`
+- [ ] **Step 5: Commit** `feat(ext): manifest, background link and handlers`
 
 ---
 
@@ -467,7 +471,6 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
 - Modify: `helper/Sources/safari-claude-helper/main.swift` (`install`, `uninstall`, `status`)
 - Create: `README.md` (setup steps from Step 4)
 - Test: `helper/Tests/HelperCoreTests/InstallerTests.swift`
-- Conditional (only if Task 1 Probe C failed): `helper/Sources/HelperCore/AX/WindowCapture.swift`. ScreenCaptureKit captures the Safari window whose AX title matches the agent tab title. `tab.screenshot` with code `background_tab` from an active-in-window tab then falls back to a daemon-side capture. Add test `captureFallbackUsedWhenExtensionFails` in `ToolRunnerTests`.
 
 **Interfaces:**
 - Consumes: `Paths` (Task 2).
@@ -481,7 +484,7 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
     - writes the plist, then `launchctl bootout gui/<uid>/dev.morphqdd.safari-claude` (errors ignored) followed by `launchctl bootstrap gui/<uid> <plist>`;
     - runs `claude mcp add --scope user safari -- <binary> mcp` using `/opt/homebrew/bin/claude`;
     - prints the remaining manual steps.
-  - `status`: whether the plist is loaded (`launchctl print`), `AXIsProcessTrusted()` for the installed binary (via `<binary> status --check-ax`), the token present, and the pinned extension origin.
+  - `status`: whether the plist is loaded (`launchctl print`), `AXIsProcessTrusted()` for the installed binary (via `<binary> status --check-ax`), the token present, and whether an extension is currently connected (asks the daemon with an mcp hello + `status` request).
 
 - [ ] **Step 1: Write failing tests**
   - `plistHasSocketAndNoKeepAlive`: the parsed plist has `Sockets.Listener.SockServiceName == "47821"`, `SockNodeName == "127.0.0.1"`, and no `KeepAlive`/`RunAtLoad` keys.
@@ -493,7 +496,7 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
   2. `scripts/build-app.sh`; open `~/Applications/Safari Agent.app` once.
   3. Safari → Settings → Extensions: enable «Safari Agent» and allow all websites. If it is not listed, enable Developer → «Allow unsigned extensions».
   4. `cd helper && swift build -c release && .build/release/safari-claude-helper install`.
-  5. System Settings → Privacy & Security → Accessibility: enable `safari-claude-helper` (and Screen Recording if the conditional capture was built).
+  5. System Settings → Privacy & Security → Accessibility: enable `safari-claude-helper`.
   6. `safari-claude-helper status` shows: loaded, AX trusted, token present.
   7. In a new `claude` session: «открой example.com во вкладке агента, прочитай страницу и нажми на ссылку». Expected:
      - a background tab opens and the owner's tab stays active;
@@ -501,7 +504,7 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
      - with the tab visible and Terminal frontmost, the click path is `trusted`;
      - while the owner types in another Safari tab, a `type` call reports the dom path and the owner's text is unaffected;
      - «Стоп» makes the next tool result `cancelled`;
-     - `lsof -i :47821` shows only launchd after 10 idle minutes once the session has ended.
+     - with no task running, Activity Monitor shows `safari-claude-helper` and the extension at 0% CPU; 10 minutes after quitting Safari, `lsof -i :47821` shows only launchd.
   8. Record the outcome in `README.md` under «Проверено».
 - [ ] **Step 5: Commit** `feat: container app, installer, README`
 
