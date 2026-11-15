@@ -9,8 +9,8 @@ function load(file, extra = {}) {
   return ctx;
 }
 
-function fakeBrowser({ tabs = [], windowFocused = true } = {}) {
-  const calls = { create: [], update: [], executeScript: [], capture: [] };
+function fakeBrowser({ tabs = [], windowFocused = true, syncCompleteOnCreate = false, reload = true } = {}) {
+  const calls = { create: [], update: [], executeScript: [], capture: [], reload: [] };
   const listeners = { updated: [], removed: [] };
   const byId = new Map(tabs.map((t) => [t.id, { status: "complete", windowId: 1, ...t }]));
   let nextId = 100;
@@ -29,15 +29,17 @@ function fakeBrowser({ tabs = [], windowFocused = true } = {}) {
         calls.create.push(o);
         const t = { id: nextId++, windowId: o.windowId ?? 1, active: false, status: "loading", url: o.url ?? "about:blank", title: "" };
         byId.set(t.id, t);
-        if (o.url) setTimeout(() => fire(t.id, "complete"), 0);
+        if (syncCompleteOnCreate) fire(t.id, "complete");
+        else if (o.url) setTimeout(() => fire(t.id, "complete"), 0);
         return t;
       },
       update: async (id, o) => {
         calls.update.push([id, o]);
         Object.assign(byId.get(id), o);
-        setTimeout(() => fire(id, "complete"), 0);
+        setTimeout(() => { fire(id, "loading"); fire(id, "complete"); }, 0);
         return byId.get(id);
       },
+      ...(reload ? { reload: async (id) => { calls.reload.push(id); setTimeout(() => { fire(id, "loading"); fire(id, "complete"); }, 0); } } : {}),
       executeScript: async (id, o) => { calls.executeScript.push([id, o]); },
       captureVisibleTab: async (w, o) => { calls.capture.push([w, o]); return "data:image/png;base64,AAA"; },
       onUpdated: { addListener: (f) => listeners.updated.push(f), removeListener: (f) => { listeners.updated = listeners.updated.filter((x) => x !== f); } },
@@ -52,14 +54,27 @@ function fakeBrowser({ tabs = [], windowFocused = true } = {}) {
   return { browser, calls, listeners, fire };
 }
 
+function fakeTimers() {
+  const list = [];
+  let n = 0;
+  return {
+    setTimeout: (f, ms) => { list.push({ f, ms, id: ++n }); return n; },
+    clearTimeout: (id) => { const i = list.findIndex((t) => t.id === id); if (i >= 0) list.splice(i, 1); },
+    pending: (ms) => list.filter((t) => t.ms === ms).length,
+    fire: (ms) => { const i = list.findIndex((t) => t.ms === ms); assert.ok(i >= 0, `no timer ${ms}`); const [t] = list.splice(i, 1); t.f(); },
+  };
+}
+const tick = () => new Promise((r) => setImmediate(r));
+
 function setup(opts, sendToTab) {
   const fb = fakeBrowser(opts);
-  const ctx = load("extension/bg/handlers.js", { setTimeout, clearTimeout });
+  const timers = fakeTimers();
+  const ctx = load("extension/bg/handlers.js", { setTimeout: timers.setTimeout, clearTimeout: timers.clearTimeout });
   const state = { agentTab: null };
   const deps = { browser: fb.browser, sendToTab: sendToTab ?? (async () => ({})), state };
   ctx.SCHandlers.watch(fb.browser, state);
   const H = { handle: async (...a) => JSON.parse(JSON.stringify(await ctx.SCHandlers.handle(...a))) };
-  return { H, deps, state, fb };
+  return { H, deps, state, fb, timers };
 }
 const j = (x) => JSON.parse(JSON.stringify(x));
 const code = async (p) => { try { await p; } catch (e) { return e.code; } return null; };
@@ -184,4 +199,145 @@ test("linkDispatchesRequestsAndEvents", async () => {
   assert.equal(ws.sent[2].error.code, "internal");
   assert.deepEqual(events, [["idle", {}]]);
   assert.deepEqual(ws.sent[3], { type: "event", name: "stop", data: {} });
+});
+
+// ---- load waiting ----
+const waitingNav = (action, opts = {}, send) => {
+  const t = setup({ tabs: [{ id: 5, url: "https://a/", title: "T" }], ...opts }, send ?? (async () => ({})));
+  t.state.agentTab = 5;
+  return t;
+};
+
+for (const action of ["back", "forward", "reload"]) {
+  test(`navigate ${action}: resolves after loading+complete`, async () => {
+    const sent = [];
+    const t = waitingNav(action, { reload: false }, async (id, m) => { sent.push(m); setTimeout(() => { t.fb.fire(5, "loading"); t.fb.fire(5, "complete"); }, 0); return {}; });
+    assert.deepEqual(await t.H.handle("navigate", { action }, t.deps), { url: "https://a/", title: "T" });
+    assert.equal(sent[0].method, "navigate");
+    assert.equal(sent[0].params.action, action);
+  });
+
+  test(`navigate ${action}: no loading within 3s resolves with current url`, async () => {
+    const t = waitingNav(action, { reload: false });
+    const p = t.H.handle("navigate", { action }, t.deps);
+    await tick();
+    t.timers.fire(3000);
+    assert.deepEqual(await p, { url: "https://a/", title: "T" });
+  });
+}
+
+test("reload uses tabs.reload when available", async () => {
+  const t = waitingNav("reload");
+  await t.H.handle("navigate", { action: "reload" }, t.deps);
+  assert.deepEqual(t.fb.calls.reload, [5]);
+});
+
+test("reload via content tolerates a lost reply", async () => {
+  const t = waitingNav("reload", { reload: false }, async () => {
+    setTimeout(() => { t.fb.fire(5, "loading"); t.fb.fire(5, "complete"); }, 0);
+    throw new Error("Message port closed before a response was received");
+  });
+  assert.deepEqual(await t.H.handle("navigate", { action: "reload" }, t.deps), { url: "https://a/", title: "T" });
+  assert.equal(t.fb.calls.executeScript.length, 0);
+});
+
+test("late pre-navigation complete does not resolve", async () => {
+  const t = waitingNav("x");
+  let done = false;
+  const p = t.H.handle("navigate", { action: "back" }, t.deps).then((r) => { done = true; return r; });
+  await tick();
+  t.fb.fire(5, "complete");
+  await tick();
+  assert.equal(done, false);
+  t.fb.fire(5, "loading");
+  t.fb.fire(5, "complete");
+  await p;
+  assert.equal(done, true);
+});
+
+test("30s timeout after loading started", async () => {
+  const t = waitingNav("x", { reload: false }, async () => ({}));
+  const p = t.H.handle("navigate", { action: "back" }, t.deps);
+  await tick();
+  t.fb.fire(5, "loading");
+  t.timers.fire(30000);
+  assert.equal(await code(p), "timeout");
+});
+
+test("tabs.create with url: complete fired synchronously during create resolves", async () => {
+  const t = setup({ syncCompleteOnCreate: true, tabs: [{ id: 1, index: 0, active: true }] });
+  const r = await t.H.handle("tabs.create", { url: "https://x/" }, t.deps);
+  assert.equal(t.state.agentTab, r.tabId);
+});
+
+test("tabs.create with url: timeout keeps agent tab but returns error", async () => {
+  const t = setup({ tabs: [{ id: 1, index: 0, active: true }] });
+  t.fb.browser.tabs.create = async (o) => { t.state.__c = 1; return { id: 77, windowId: 1, status: "loading" }; };
+  t.fb.browser.tabs.get = async () => ({ id: 77, status: "loading" });
+  const p = t.H.handle("tabs.create", { url: "https://x/" }, t.deps);
+  await tick(); await tick();
+  t.timers.fire(30000);
+  assert.equal(await code(p), "timeout");
+  assert.equal(t.state.agentTab, 77);
+});
+
+// ---- content/main.js ----
+function loadMain({ top = true, SC = {} } = {}) {
+  const listeners = [];
+  const win = {};
+  win.top = top ? win : {};
+  const ctx = vm.createContext({
+    window: win, SC, history: { back() { SC.__h = "back"; }, forward() { SC.__h = "forward"; } },
+    location: { reload() { SC.__h = "reload"; } },
+    browser: { runtime: { onMessage: { addListener: (f) => listeners.push(f) } } },
+  });
+  vm.runInContext(readFileSync("extension/content/main.js", "utf8"), ctx);
+  return { listeners, SC: ctx.SC };
+}
+
+test("main: top frame maps methods to SC", async () => {
+  const { listeners } = loadMain({ SC: { snapshot: (f) => `snap:${f}`, find: (q) => [{ ref: q }], domType: (r, t) => t + r } });
+  assert.equal(listeners.length, 1);
+  assert.deepEqual(j(await listeners[0]({ method: "page.snapshot", params: {} })), { text: "snap:interactive" });
+  assert.deepEqual(j(await listeners[0]({ method: "page.find", params: { query: "q" } })), { matches: [{ ref: "q" }] });
+  assert.deepEqual(j(await listeners[0]({ method: "el.domType", params: { ref: "e1", text: "hi" } })), { value: "hie1" });
+  assert.deepEqual(j(await listeners[0]({ method: "navigate", params: { action: "back" } })), {});
+  assert.equal(listeners[0]({ method: "unknown" }), undefined);
+});
+
+test("main: subframe registers no listener", () => {
+  assert.equal(loadMain({ top: false }).listeners.length, 0);
+});
+
+test("main: errors map to {error}", async () => {
+  const { listeners } = loadMain({ SC: {
+    snapshot: () => { throw { code: "not_found", message: "gone" }; },
+    find: () => { throw new Error("kaput"); },
+  } });
+  assert.deepEqual(j(await listeners[0]({ method: "page.snapshot", params: {} })), { error: { code: "not_found", message: "gone" } });
+  assert.deepEqual(j(await listeners[0]({ method: "page.find", params: {} })), { error: { code: "internal", message: "kaput" } });
+});
+
+// ---- background.js wiring ----
+test("background: idle hides overlay, content stop forwards event", async () => {
+  const sockets = [];
+  class WS { constructor() { this.readyState = 1; this.sent = []; sockets.push(this); } send(s) { this.sent.push(JSON.parse(s)); } }
+  const sent = [];
+  let onMsg;
+  const browser = {
+    tabs: { sendMessage: async (id, m, o) => { sent.push([id, m, o]); return {}; }, onRemoved: { addListener() {} } },
+    runtime: { onMessage: { addListener: (f) => { onMsg = f; } } },
+  };
+  const ctx = vm.createContext({ console, JSON, Promise, WebSocket: WS, setTimeout: () => 1, browser });
+  for (const f of ["bg/link.js", "bg/handlers.js", "background.js"]) vm.runInContext(readFileSync(`extension/${f}`, "utf8"), ctx);
+  const ws = sockets[0];
+  // no agent tab yet: idle is a no-op
+  ws.onmessage({ data: JSON.stringify({ type: "event", name: "idle", data: {} }) });
+  assert.equal(sent.length, 0);
+  ctx.SCHandlers.handle; // loaded
+  vm.runInContext("state.agentTab = 9", ctx);
+  ws.onmessage({ data: JSON.stringify({ type: "event", name: "idle", data: {} }) });
+  assert.deepEqual(j(sent[0]), [9, { method: "overlay.status", params: { text: null } }, { frameId: 0 }]);
+  onMsg({ event: "stop" });
+  assert.deepEqual(j(ws.sent.at(-1)), { type: "event", name: "stop", data: {} });
 });

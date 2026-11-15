@@ -36,25 +36,60 @@
     return res ?? {};
   }
 
-  // Resolves once `tabId` reports status "complete"; `start` is invoked after the listener is armed.
-  function whenLoaded(browser, tabId, start) {
+  const NO_LOAD_MS = 3000;
+
+  // `start()` performs the navigation and returns the tab id. The onUpdated listener is armed
+  // first. Resolves after a `loading` (or url change) followed by `complete`; if no loading
+  // starts within 3 s the navigation is treated as same-document/no-op and resolves anyway.
+  // `fresh` (new tab): a `complete` alone is enough, including one seen before create returned.
+  function whenLoaded(browser, start, { fresh = false } = {}) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let tabId = null;
+      let loading = false;
+      let done = false;
+      let idleTimer = null;
+      let hardTimer = null;
+      const early = [];
+      const finish = (fn, v) => {
+        if (done) return;
+        done = true;
+        clearTimeout(idleTimer);
+        clearTimeout(hardTimer);
         browser.tabs.onUpdated.removeListener(on);
-        reject(err("timeout", "Страница не загрузилась за 30 с"));
-      }, LOAD_TIMEOUT_MS);
+        fn(v);
+      };
+      const armHard = () => {
+        if (hardTimer == null) {
+          hardTimer = setTimeout(() => finish(reject, err("timeout", "Страница не загрузилась за 30 с")), LOAD_TIMEOUT_MS);
+        }
+      };
+      const see = (info) => {
+        if (info.status === "loading" || info.url !== undefined) {
+          loading = true;
+          clearTimeout(idleTimer);
+          armHard();
+        }
+        if (info.status === "complete" && (loading || fresh)) finish(resolve);
+      };
       function on(id, info) {
-        if (id !== tabId || info.status !== "complete") return;
-        clearTimeout(timer);
-        browser.tabs.onUpdated.removeListener(on);
-        resolve();
+        if (tabId == null) early.push([id, info]);
+        else if (id === tabId) see(info);
       }
       browser.tabs.onUpdated.addListener(on);
-      Promise.resolve(start()).catch((e) => {
-        clearTimeout(timer);
-        browser.tabs.onUpdated.removeListener(on);
-        reject(e);
-      });
+      Promise.resolve()
+        .then(start)
+        .then(async (id) => {
+          tabId = id;
+          for (const [eid, info] of early) if (eid === id) see(info);
+          if (done) return;
+          if (fresh) {
+            armHard();
+            if ((await browser.tabs.get(id)).status === "complete") finish(resolve);
+          } else if (!loading) {
+            idleTimer = setTimeout(() => finish(resolve), NO_LOAD_MS);
+          }
+        })
+        .catch((e) => finish(reject, e));
     });
   }
 
@@ -82,10 +117,14 @@
         const opts = { active: false };
         if (active) { opts.index = active.index + 1; opts.windowId = active.windowId; }
         if (params.url) opts.url = params.url;
-        const tab = await browser.tabs.create(opts);
-        state.agentTab = tab.id;
-        if (params.url) await whenLoaded(browser, tab.id, () => {});
-        return { tabId: tab.id };
+        const make = async () => {
+          const tab = await browser.tabs.create(opts);
+          state.agentTab = tab.id;
+          return tab.id;
+        };
+        if (!params.url) return { tabId: await make() };
+        await whenLoaded(browser, make, { fresh: true });
+        return { tabId: state.agentTab };
       }
       case "tabs.select": {
         try {
@@ -105,9 +144,22 @@
       case "navigate": {
         const id = agent(deps);
         if (params.url) {
-          await whenLoaded(browser, id, () => browser.tabs.update(id, { url: params.url }));
+          await whenLoaded(browser, async () => { await browser.tabs.update(id, { url: params.url }); return id; });
         } else if (["back", "forward", "reload"].includes(params.action)) {
-          await whenLoaded(browser, id, () => toContent(deps, id, "navigate", { action: params.action }));
+          await whenLoaded(browser, async () => {
+            if (params.action === "reload" && browser.tabs.reload) {
+              await browser.tabs.reload(id);
+            } else {
+              // The page may unload before replying; a lost reply is not a failure.
+              try {
+                const res = await deps.sendToTab(id, { method: "navigate", params: { action: params.action } });
+                if (res && res.error) throw res.error;
+              } catch (e) {
+                if (e && typeof e.code === "string") throw e;
+              }
+            }
+            return id;
+          });
         } else {
           throw err("bad_request", "navigate: нужен url или action");
         }
