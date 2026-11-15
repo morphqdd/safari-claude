@@ -12,6 +12,7 @@ SCLink.onEvent = (name) => {
   }
 };
 browser.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.event === "stop") SCLink.sendEvent("stop", {});
+  if (msg && msg.event === "stop") return Promise.resolve({ ok: !!SCLink.sendEvent("stop", {}) });
+  return undefined;
 });
 SCLink.connect();

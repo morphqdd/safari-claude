@@ -6,7 +6,7 @@ import { loadContent } from "./helpers.mjs";
 function load(html = "<title>Page</title><button>Go</button>") {
   const w = loadContent(html, []);
   const sent = [];
-  w.browser = { runtime: { sendMessage: async (m) => void sent.push(m) } };
+  w.browser = { runtime: { sendMessage: async (m) => (sent.push(m), { ok: true }) } };
   w.eval(readFileSync("extension/content/overlay.js", "utf8"));
   return { w, sent };
 }
@@ -74,6 +74,17 @@ test("stopFailureKeepsButtonEnabled", async () => {
     assert.ok(!b.disabled, mode);
     assert.equal(b.parentNode.querySelector(".txt").textContent, "Не удалось остановить", mode);
   }
+});
+
+test("stopOkFalseIsFailure", async () => {
+  const { w } = load();
+  w.browser.runtime.sendMessage = async () => ({ ok: false });
+  w.SC.overlay.status("x");
+  const b = w.SC.overlay._stopButtonForTest();
+  b.click();
+  await sleep(10);
+  assert.ok(!b.disabled);
+  assert.equal(b.parentNode.querySelector(".txt").textContent, "Не удалось остановить");
 });
 
 test("statusNullResolvesPendingMoveTo", async () => {

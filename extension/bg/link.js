@@ -5,8 +5,11 @@
   let ws = null;
   let attempt = 0;
 
+  const isConnected = () => !!(ws && ws.readyState === 1);
   const send = (obj) => {
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+    if (!isConnected()) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
   };
 
   async function onReq(m) {
@@ -46,8 +49,9 @@
         schedule();
       };
     },
+    isConnected,
     sendEvent(name, data = {}) {
-      send({ type: "event", name, data });
+      return send({ type: "event", name, data });
     },
   });
 

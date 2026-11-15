@@ -70,7 +70,8 @@
       if (stop.disabled) return;
       stop.disabled = true;
       try {
-        await browser.runtime.sendMessage({ event: "stop" });
+        const r = await browser.runtime.sendMessage({ event: "stop" });
+        if (!r || r.ok !== true) throw new Error("stop not delivered");
         label.textContent = "Остановлено";
         st.stopped = true;
       } catch {
