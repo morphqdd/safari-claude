@@ -6,16 +6,18 @@ import { JSDOM } from "jsdom";
 const tick = () => new Promise((r) => setImmediate(r));
 const j = (x) => JSON.parse(JSON.stringify(x));
 
-async function page(stored) {
+async function page(stored, { timers, connect } = {}) {
   const html = readFileSync("extension/chat/chat.html", "utf8");
   const dom = new JSDOM(html, { runScripts: "outside-only", url: "safari-web-extension://ABCD/chat/chat.html" });
   const w = dom.window;
+  if (timers) w.setTimeout = (f, ms) => void timers.push({ f, ms });
   w.eval(readFileSync("extension/chat/chat.js", "utf8"));
   const store = stored ? { "sc.chat": j(stored) } : {};
   const sent = [];
   let onMsg, onDis, connects = 0;
   const browser = {
     runtime: { connect: (o) => {
+      if (connect) return connect(o);
       assert.equal(o.name, "chat");
       connects++;
       return {
@@ -215,15 +217,19 @@ test("restoreDropsInvalidEntries", async () => {
 });
 
 test("portDisconnectReconnectsAndEndsWaiting", async () => {
-  const p = await page();
+  const timers = [];
+  const p = await page(undefined, { timers });
   await p.type("x");
   p.key("Enter");
   await tick();
   await p.drop();
-  assert.equal(p.connects(), 2);
   assert.match(p.$(".error").textContent, /Связь с расширением прервалась/);
   assert.equal(p.$("#send").disabled, false);
+  assert.equal(p.connects(), 1);
+  timers.shift().f();
+  assert.equal(p.connects(), 2);
   await p.drop();
+  timers.shift().f();
   assert.equal(p.connects(), 3);
   assert.equal(p.d.querySelectorAll(".error").length, 1);
 });
@@ -234,4 +240,48 @@ test("deltasAreSavedOnTurnEndNotPerToken", async () => {
   assert.equal(p.store["sc.chat"], undefined);
   await p.push({ type: "turnEnd" });
   assert.equal(p.store["sc.chat"].entries[0].text, "a");
+});
+
+test("reconnectBacksOffAndNeverLoops", async () => {
+  const timers = [];
+  let n = 0;
+  const mk = () => ({
+    postMessage() {},
+    onMessage: { addListener() {} },
+    onDisconnect: { addListener: (f) => { n++; f(); } }, // dies at once
+  });
+  await page(undefined, { timers, connect: mk });
+  assert.equal(n, 1);
+  // fire timers as they appear: each reconnect schedules exactly one more
+  const delays = [];
+  for (let i = 0; i < 6; i++) { const t = timers.shift(); delays.push(t.ms); t.f(); }
+  assert.deepEqual(delays, [500, 1000, 2000, 5000, 5000, 5000]);
+  assert.equal(timers.length, 1);
+  assert.equal(n, 7);
+});
+
+test("throwingConnectDoesNotEscapeAndRetries", async () => {
+  const timers = [];
+  let n = 0;
+  await page(undefined, { timers, connect: () => { n++; throw new Error("invalidated"); } });
+  assert.equal(timers.length, 1);
+  timers.shift().f();
+  assert.equal(n, 2);
+  assert.equal(timers.length, 1);
+});
+
+test("backoffResetsAfterMessage", async () => {
+  const timers = [];
+  let onMsg, onDis;
+  const mk = () => ({
+    postMessage() {},
+    onMessage: { addListener: (f) => { onMsg = f; } },
+    onDisconnect: { addListener: (f) => { onDis = f; } },
+  });
+  await page(undefined, { timers, connect: mk });
+  onDis(); timers.shift().f(); // 500
+  onDis(); assert.equal(timers[0].ms, 1000); timers.shift().f();
+  onMsg({ type: "turnEnd" });
+  onDis();
+  assert.equal(timers[0].ms, 500);
 });

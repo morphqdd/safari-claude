@@ -2,6 +2,7 @@
 (() => {
   const KEY = "sc.chat";
   const KINDS = ["user", "assistant", "action", "notice", "error"];
+  const BACKOFF = [500, 1000, 2000, 5000]; // ms; the last value repeats
   const LOST = "Связь с расширением прервалась";
   const BUSY = "Занято другой сессией";
 
@@ -70,15 +71,29 @@
       }
     } catch { /* start empty */ }
 
-    let port;
-    function connect() {
-      port = browser.runtime.connect({ name: "chat" });
-      port.onMessage.addListener(onMessage);
-      port.onDisconnect.addListener(() => {
-        if (waiting) { add("error", LOST); setWaiting(false); }
-        connect(); // the background re-sends pending cards on connect
-      });
+    let port = null;
+    let attempt = 0; // reconnects since the last message from the background
+    const later = doc.defaultView.setTimeout.bind(doc.defaultView);
+    function reconnectSoon() {
+      later(connect, BACKOFF[Math.min(attempt, BACKOFF.length - 1)]);
+      attempt++;
     }
+    function connect() {
+      try {
+        const p = browser.runtime.connect({ name: "chat" });
+        port = p;
+        p.onMessage.addListener((m) => { attempt = 0; onMessage(m); });
+        p.onDisconnect.addListener(() => {
+          if (port === p) port = null;
+          if (waiting) { add("error", LOST); setWaiting(false); }
+          reconnectSoon(); // the background re-sends pending cards on connect
+        });
+      } catch {
+        port = null;
+        reconnectSoon();
+      }
+    }
+    const post = (m) => { try { port?.postMessage(m); } catch { /* port gone: reconnect is scheduled */ } };
 
     function submit() {
       const text = input.value.trim();
@@ -86,7 +101,7 @@
       input.value = "";
       add("user", text);
       setWaiting(true);
-      port.postMessage({ type: "send", text });
+      post({ type: "send", text });
     }
 
     function closeCard(id, answer) {
@@ -121,7 +136,7 @@
         b.type = "button";
         b.textContent = label;
         b.addEventListener("click", () => {
-          port.postMessage({ type: "confirmReply", id: m.id, decision });
+          post({ type: "confirmReply", id: m.id, decision });
           closeCard(m.id, LABELS[decision]);
         });
         buttons.appendChild(b);
@@ -162,7 +177,7 @@
       }
     });
     send.addEventListener("click", submit);
-    stop.addEventListener("click", () => port.postMessage({ type: "stop" }));
+    stop.addEventListener("click", () => post({ type: "stop" }));
     $("new").addEventListener("click", () => {
       entries = [];
       current = null;
@@ -170,7 +185,7 @@
       log.textContent = "";
       setWaiting(false);
       save();
-      port.postMessage({ type: "new" });
+      post({ type: "new" });
     });
   }
 
