@@ -49,11 +49,18 @@ public enum Installer {
         exists(preferredClaude) ? preferredClaude : "claude"
     }
 
-    /// Absolute path of `claude`: the preferred location, else what `which` finds, else the bare name.
-    static func resolveClaude() -> String {
+    /// Absolute path of `claude`: the preferred location, else what `which` finds; nil when neither is absolute.
+    static func resolveClaude() -> String? {
         if FileManager.default.isExecutableFile(atPath: preferredClaude) { return preferredClaude }
         let found = run("/usr/bin/which", ["claude"]).out.trimmingCharacters(in: .whitespacesAndNewlines)
-        return found.hasPrefix("/") ? found : claudeExecutable()
+        return found.hasPrefix("/") ? found : nil
+    }
+
+    /// Saves only an absolute path; returns whether it was saved.
+    @discardableResult
+    static func persistClaudePath(_ path: String?, to file: URL = Paths.claudePath) -> Bool {
+        guard let path, path.hasPrefix("/") else { return false }
+        return (try? writeClaudePath(path, to: file)) != nil
     }
 
     public static func writeClaudePath(_ path: String, to file: URL = Paths.claudePath) throws {
@@ -162,8 +169,13 @@ public enum Installer {
         try runChecked("launchctl", ["bootstrap", domain, Paths.plist.path])
         print("LaunchAgent загружен: \(Paths.plist.path)")
 
-        let claude = resolveClaude()
-        try? writeClaudePath(claude)
+        let resolved = resolveClaude()
+        if resolved == nil {
+            print("⚠️ claude не найден: окно чата не сможет его запустить. Установите Claude Code и повторите install.")
+        } else if !persistClaudePath(resolved) {
+            print("⚠️ Не удалось сохранить путь к claude (\(Paths.claudePath.path)): окно чата может не найти claude. Повторите install.")
+        }
+        let claude = resolved ?? claudeExecutable()
         let args = claudeAddArguments(binary: dest)
         let r = run(claude, args)
         if r.status == 0 {
@@ -186,7 +198,7 @@ public enum Installer {
 
     public static func uninstall() throws {
         run("launchctl", ["bootout", "\(domain)/\(label)"])
-        let claude = claudeExecutable()
+        let claude = readClaudePath()
         let r = run(claude, ["mcp", "remove", "--scope", "user", "safari"])
         if r.status != 0 { print("⚠️ claude mcp remove не выполнено; при необходимости: \(claude) mcp remove --scope user safari") }
         try removeFiles()

@@ -64,6 +64,16 @@ import Foundation
         #expect(Installer.readClaudePath(from: file) == Installer.claudeExecutable())
     }
 
+    @Test func nonAbsoluteClaudePathIsNotStored() {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("sc-na-\(UUID().uuidString)")
+        #expect(!Installer.persistClaudePath(nil, to: file))
+        #expect(!Installer.persistClaudePath("claude", to: file))
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(Installer.persistClaudePath("/usr/local/bin/claude", to: file))
+        #expect(Installer.readClaudePath(from: file) == "/usr/local/bin/claude")
+        try? FileManager.default.removeItem(at: file)
+    }
+
     @Test func writesAndRemovesPlist() throws {
         // Explicit paths: never mutates the global Paths.root (other suites run in parallel).
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sc-inst-\(UUID().uuidString)")
