@@ -50,11 +50,7 @@ func runUninstall() -> Never {
     exit(0)
 }
 func runStatus() -> Never {
-    if CommandLine.arguments.contains("--check-ax") {
-        print(Installer.axTrusted() ? "trusted" : "not trusted")
-    } else {
-        print(Installer.status())
-    }
+    print(Installer.status())
     exit(0)
 }
 

@@ -56,7 +56,9 @@ import Foundation
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sc-inst-\(UUID().uuidString)")
         let file = dir.appendingPathComponent("LaunchAgents/x.plist")
         try Installer.writePlist(binary: binary, to: file)
-        #expect(try String(contentsOf: file, encoding: .utf8) == Installer.plist(binary: binary))
+        // Not compared to plist(): its log path follows Paths.root, which parallel suites reassign.
+        let written = try String(contentsOf: file, encoding: .utf8)
+        #expect(written.contains(binary.path) && written.contains(Installer.label))
         try Installer.removeFiles([file, dir.appendingPathComponent("absent")])
         #expect(!FileManager.default.fileExists(atPath: file.path))
         try? FileManager.default.removeItem(at: dir)

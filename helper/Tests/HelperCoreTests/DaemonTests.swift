@@ -95,13 +95,13 @@ private func errorCode(_ c: FakeConnection, id: Int) -> String? {
 
     @Test func statusReportsExtensionConnection() async {
         let (auth, token) = tempAuth()
-        let d = Daemon(auth: auth, tools: FakeTools(), exit: {})
+        let d = Daemon(auth: auth, tools: FakeTools(), axTrusted: { true }, exit: {})
         let m = await mcp(d, token)
         m.receive(.req(id: 1, method: "status", params: .object([:])))
-        #expect(await eventually { m.sent.contains(.res(id: 1, result: .object(["extensionConnected": .bool(false)]), error: nil)) })
+        #expect(await eventually { m.sent.contains(.res(id: 1, result: .object(["extensionConnected": .bool(false), "axTrusted": .bool(true)]), error: nil)) })
         _ = await ext(d)
         m.receive(.req(id: 2, method: "status", params: .object([:])))
-        #expect(await eventually { m.sent.contains(.res(id: 2, result: .object(["extensionConnected": .bool(true)]), error: nil)) })
+        #expect(await eventually { m.sent.contains(.res(id: 2, result: .object(["extensionConnected": .bool(true), "axTrusted": .bool(true)]), error: nil)) })
     }
 
     @Test func routesToolCallToHandler() async {

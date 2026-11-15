@@ -2,6 +2,10 @@
   "name": "safari-claude",
   "private": true,
   "type": "module",
-  "scripts": { "test:ext": "node --test tests/extension/" },
-  "devDependencies": { "jsdom": "25.0.1" }
+  "scripts": {
+    "test": "node --test tests/extension/*.test.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "25.0.1"
+  }
 }

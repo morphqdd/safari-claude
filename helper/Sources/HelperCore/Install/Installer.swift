@@ -172,35 +172,32 @@ public enum Installer {
         print("Удалено: LaunchAgent, бинарник, токен. Приложение Safari Agent удалите вручную из ~/Applications.")
     }
 
-    public static func axTrusted() -> Bool { AXIsProcessTrusted() }
-
     public static func status() -> String {
         var lines: [String] = []
         let loaded = run("launchctl", ["print", "\(domain)/\(label)"]).status == 0
         lines.append("LaunchAgent: \(loaded ? "загружен" : "не загружен")")
 
-        let bin = Paths.installedBinary
-        var ax = "бинарник не установлен"
-        if FileManager.default.isExecutableFile(atPath: bin.path) {
-            let out = run(bin.path, ["status", "--check-ax"]).out.trimmingCharacters(in: .whitespacesAndNewlines)
-            ax = out == "trusted" ? "доступ выдан" : "доступ НЕ выдан"
-        }
-        lines.append("Accessibility: \(ax)")
         lines.append("Токен: \(tokenPresent() ? "есть" : "нет")")
 
+        // Asked of the daemon itself: this CLI runs under the terminal, whose permission differs.
+        var ax = "неизвестно (демон не ответил)"
         var ext = "неизвестно"
         if let token = try? Auth().loadOrCreateToken(), loaded {
             let box = ResultBox()
             let sem = DispatchSemaphore(value: 0)
             Task {
-                box.value = try? await DaemonClient(token: token, timeout: 5).extensionConnected()
+                box.value = try? await DaemonClient(token: token, timeout: 5).daemonStatus()
                 sem.signal()
             }
-            if sem.wait(timeout: .now() + 8) == .success, let v = box.value { ext = v ? "подключено" : "не подключено" }
+            if sem.wait(timeout: .now() + 8) == .success, let v = box.value {
+                ax = v.axTrusted ? "доступ выдан" : "доступ НЕ выдан"
+                ext = v.extensionConnected ? "подключено" : "не подключено"
+            }
         }
+        lines.append("Accessibility (демон): \(ax)")
         lines.append("Расширение Safari: \(ext)")
         return lines.joined(separator: "\n")
     }
 
-    private final class ResultBox: @unchecked Sendable { var value: Bool? }
+    private final class ResultBox: @unchecked Sendable { var value: (extensionConnected: Bool, axTrusted: Bool)? }
 }

@@ -21,9 +21,11 @@ public final class DaemonClient: @unchecked Sendable {
         try await request("tool.call", .object(["name": .string(name), "arguments": args]))
     }
 
-    /// Asks the daemon whether the Safari extension is currently connected.
-    public func extensionConnected() async throws -> Bool {
-        try await request("status", .object([:]))["extensionConnected"]?.bool ?? false
+    /// Asks the daemon whether the Safari extension is connected and whether the daemon itself
+    /// (the process launchd runs, not the caller) has the Accessibility permission.
+    public func daemonStatus() async throws -> (extensionConnected: Bool, axTrusted: Bool) {
+        let r = try await request("status", .object([:]))
+        return (r["extensionConnected"]?.bool ?? false, r["axTrusted"]?.bool ?? false)
     }
 
     private func request(_ method: String, _ params: JSON) async throws -> JSON {

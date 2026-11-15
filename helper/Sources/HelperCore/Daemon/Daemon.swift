@@ -1,3 +1,4 @@
+import ApplicationServices
 import Foundation
 
 /// Transport + routing + busy lock + lifecycle. Tool logic lives behind `ToolHandling`.
@@ -30,10 +31,13 @@ public final class Daemon {
     private var stopped = false
     static let stopMessage = "Пользователь нажал «Стоп». Не повторяй действие — спроси пользователя, что делать дальше."
     private var inflight: [ObjectIdentifier: Call] = [:]
+    private let axTrusted: () -> Bool
 
     public init(auth: Auth, tools: ToolHandling, idleExit: TimeInterval = 600, lockIdle: TimeInterval = 120,
+                axTrusted: @escaping () -> Bool = { AXIsProcessTrusted() },
                 exit: @escaping () -> Void = { Foundation.exit(0) }) {
         self.auth = auth
+        self.axTrusted = axTrusted
         self.tools = tools
         self.link = ExtensionLink()
         exitMonitor = IdleMonitor(queue: q, delay: idleExit) { [self] in
@@ -100,7 +104,7 @@ public final class Daemon {
             send(client.conn, .res(id: id, result: nil, error: .badRequest("extension cannot send requests")))
         case (.mcp, .req(let id, let method, let params)):
             if method == "status" {
-                send(client.conn, .res(id: id, result: .object(["extensionConnected": .bool(ext != nil)]), error: nil))
+                send(client.conn, .res(id: id, result: .object(["extensionConnected": .bool(ext != nil), "axTrusted": .bool(axTrusted())]), error: nil))
                 return
             }
             guard method == "tool.call" else {
