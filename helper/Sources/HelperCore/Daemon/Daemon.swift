@@ -212,6 +212,15 @@ public final class Daemon {
             }
         }
         if owner === client && inflight.isEmpty { lockMonitor.arm() }
+        // e.g. a confirm card answered after the turn ended
+        if owner === client && client.isChat { releaseIfChatDone() }
+    }
+
+    /// Once the chat's turn is over and nothing is in flight, Safari is released right away
+    /// (`idle` hides the page overlay and clears Stop); terminal owners keep the lockIdle behaviour.
+    private func releaseIfChatDone() {
+        guard !chatReserved, inflight.isEmpty, owner?.isChat ?? true else { return }
+        releaseLock()
     }
 
     /// Asks the owner in the chat window; runs the tool only if allowed. Called off-queue from the call's task.
@@ -280,8 +289,7 @@ public final class Daemon {
         case .turnEnd:
             sendExt("chat.turnEnd")
             chatReserved = false
-            // A Stop without an owner only guarded the turn; with an owner the normal lockIdle applies.
-            if owner == nil { stopped = false } else if inflight.isEmpty { lockMonitor.arm() }
+            releaseIfChatDone()
             // Sites allowed "once" last for one turn. Best-effort.
             Task { [link] in _ = try? await link.request("site.clearOnce", .object([:])) }
         }

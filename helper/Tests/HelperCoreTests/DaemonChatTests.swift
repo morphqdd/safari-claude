@@ -26,6 +26,9 @@ final class DaemonChatHarness: @unchecked Sendable {
     private var _toolCalls: [String] = []
     let token: String
     var daemon: Daemon!
+    /// The daemon's queue and chat event handler, to inject events ChatSession cannot produce on cue.
+    private var chatQueue: DispatchQueue?
+    private var chatEmit: ((ChatEvent) -> Void)?
 
     init(lockIdle: TimeInterval = 120, idleExit: TimeInterval = 600, exit: @escaping () -> Void = {},
          tool: (@Sendable (String, JSON) async throws -> JSON)? = nil) {
@@ -38,7 +41,9 @@ final class DaemonChatHarness: @unchecked Sendable {
             return try await tool?(name, args) ?? args
         })
         daemon = Daemon(auth: auth, tools: tools, idleExit: idleExit, lockIdle: lockIdle, chat: { [unowned self] q, emit in
-            ChatSession(queue: q, launcher: { _, env, _ in
+            chatQueue = q
+            chatEmit = emit
+            return ChatSession(queue: q, launcher: { _, env, _ in
                 let p = LockedClaude()
                 self.lock.withLock {
                     self._processes.append(p)
@@ -78,6 +83,7 @@ final class DaemonChatHarness: @unchecked Sendable {
         _ = await eventually { self.processes.reduce(0) { $0 + $1.written.count } > written }
     }
     func endTurn() { processes.last?.onLine?(resultLine) }
+    func emit(_ event: ChatEvent) { chatQueue!.sync { chatEmit!(event) } }
 }
 
 private let resultLine = #"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"sess-1","result":"Hi"}"#
@@ -153,12 +159,12 @@ private func idles(_ c: FakeConnection) -> Int {
         let c = await h.mcp(chat: h.key)
         c.receive(call(1, args: .object(["x": .number(1)])))
         #expect(await eventually { response(c, id: 1)?.0 == .object(["x": .number(1)]) })
-        // still the owner after the turn ends, until lockIdle
-        h.endTurn()
-        #expect(await eventually { hasEvent(e, "chat.turnEnd") })
+        // the owner for the rest of the turn
         let a = await h.mcp()
         a.receive(call(2))
         #expect(await eventually { response(a, id: 2)?.1?.code == "busy" })
+        c.receive(call(3))
+        #expect(await eventually { response(c, id: 3) != nil })
     }
 
     @Test func wrongChatKeyIsTerminalClient() async {
@@ -189,20 +195,67 @@ private func idles(_ c: FakeConnection) -> Int {
         a.receive(call(1))
         #expect(await eventually { response(a, id: 1)?.0 == empty })
 
-        // with a chat owner, the normal lockIdle applies after the turn
+        // a chat owner keeps the lock for the whole turn, past lockIdle
         a.disconnect()
-        #expect(await eventually { idles(e) == 1 })
+        #expect(await eventually { idles(e) == 2 }) // turn end without owner, then a's disconnect
         await h.startTurn(e)
         let c = await h.mcp(chat: h.key)
         c.receive(call(2))
         #expect(await eventually { response(c, id: 2) != nil })
         try? await Task.sleep(nanoseconds: 500_000_000)
-        #expect(idles(e) == 1)
+        #expect(idles(e) == 2)
         h.endTurn()
-        #expect(await eventually { idles(e) == 2 })
+        #expect(await eventually { idles(e) == 3 })
         let b = await h.mcp()
         b.receive(call(3))
         #expect(await eventually { response(b, id: 3)?.0 == empty })
+    }
+
+    @Test func chatTurnEndReleasesLockAndSendsIdle() async {
+        let h = DaemonChatHarness() // lockIdle 120 s: the release must not wait for it
+        let e = await h.ext()
+        await h.startTurn(e)
+        let c = await h.mcp(chat: h.key)
+        c.receive(call(1))
+        #expect(await eventually { response(c, id: 1) != nil })
+        h.endTurn()
+        #expect(await eventually { idles(e) == 1 })
+        let a = await h.mcp()
+        a.receive(call(2))
+        #expect(await eventually { response(a, id: 2)?.0 == empty })
+    }
+
+    @Test func chatTurnEndAfterStopReleasesLock() async {
+        let h = DaemonChatHarness()
+        let e = await h.ext()
+        await h.startTurn(e)
+        let c = await h.mcp(chat: h.key)
+        c.receive(call(1))
+        #expect(await eventually { response(c, id: 1) != nil })
+        e.receive(.event(name: "stop", data: empty))
+        #expect(await eventually { h.processes[0].written.count == 2 })
+        c.receive(call(2))
+        #expect(await eventually { response(c, id: 2)?.1?.code == "cancelled" })
+        // claude ends the interrupted turn
+        h.processes[0].onLine?(#"{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"session_id":"sess-1"}"#)
+        #expect(await eventually { idles(e) == 1 })
+        // Stop is cleared with the lock
+        let a = await h.mcp()
+        a.receive(call(3))
+        #expect(await eventually { response(a, id: 3)?.0 == empty })
+    }
+
+    @Test func chatTurnEndDoesNotReleaseTerminalLock() async {
+        let h = DaemonChatHarness()
+        let e = await h.ext()
+        let a = await h.mcp(), b = await h.mcp()
+        a.receive(call(1))
+        #expect(await eventually { response(a, id: 1) != nil })
+        h.emit(.turnEnd)
+        #expect(await eventually { hasEvent(e, "chat.turnEnd") })
+        #expect(idles(e) == 0)
+        b.receive(call(2))
+        #expect(await eventually { response(b, id: 2)?.1?.code == "busy" })
     }
 
     @Test func chatEventsAreForwarded() async {
