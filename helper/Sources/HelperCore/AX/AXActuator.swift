@@ -11,7 +11,7 @@ public final class AXActuator: Actuator {
     public func isSafariFrontmost() -> Bool { Frontmost.isSafari() }
 
     public func press(marker: String, pageURL: String) throws {
-        guard let area = SafariLocator.webArea(url: pageURL) else {
+        guard let area = try SafariLocator.webArea(url: pageURL) else {
             throw RPCError.notFound("no web area for \(pageURL)")
         }
         guard let el = Self.find(area, marker: marker, depth: 0) else {

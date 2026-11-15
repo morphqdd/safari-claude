@@ -8,10 +8,10 @@ import Testing
             print("SKIP AXLive: SC_LIVE_AX != 1")
             return
         }
-        var tries = 0
+        var retries = 0
         while Frontmost.isSafari() {
-            tries += 1
-            if tries >= 3 {
+            retries += 1
+            if retries > 3 {
                 print("SKIP AXLive: Safari is frontmost (owner using it); live test NOT run")
                 return
             }
