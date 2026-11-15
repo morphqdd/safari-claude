@@ -107,6 +107,8 @@ private func eventually(_ timeout: TimeInterval = 2, _ cond: () -> Bool) async -
         #expect(l.environment["HOME"] == env["HOME"])
         #expect(l.environment["PATH"] == env["PATH"])
         #expect(l.environment["USER"] == env["USER"])
+        // A pending confirm_action card must not be timed out by claude (no timeout end to end).
+        #expect(l.environment["MCP_TOOL_TIMEOUT"] == "86400000")
         #expect(h.last.written == [StreamJSON.userLine("привет")])
         #expect(h.on { h.session.isRunning && h.session.turnActive })
     }

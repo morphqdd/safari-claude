@@ -66,6 +66,17 @@ extension DaemonTests {
         #expect(r["isError"]?.bool == false)
     }
 
+    @Test func confirmActionHasNoClientTimeout() async throws {
+        let (daemon, listener, port, token) = try startDaemon { name, _, _ in
+            if name == "confirm_action" { try? await Task.sleep(nanoseconds: 1_000_000_000) }
+            return .object(["content": .array([]), "isError": .bool(false)])
+        }
+        defer { withExtendedLifetime((daemon, listener)) {} }
+        let client = DaemonClient(port: port, token: token, timeout: 0.3)
+        let r = try await client.call("confirm_action", .object(["kind": .string("click"), "ref": .string("e1")]))
+        #expect(r["isError"]?.bool == false)
+    }
+
     @Test func clientSendsChatKey() async throws {
         final class Box: @unchecked Sendable {
             let l = NSLock(); var first: String?

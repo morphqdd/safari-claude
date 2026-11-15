@@ -99,6 +99,8 @@ public final class ChatSession {
         if let resume { args += ["--resume", resume] }
         var env = ProcessInfo.processInfo.environment.filter { ["HOME", "USER", "PATH"].contains($0.key) }
         env["SC_CHAT_KEY"] = key
+        // ms; a confirm_action card waits for the owner with no timeout end to end.
+        env["MCP_TOOL_TIMEOUT"] = "86400000"
         do {
             let config = try writeConfig(key: key)
             args[args.firstIndex(of: "--mcp-config")! + 1] = config.path

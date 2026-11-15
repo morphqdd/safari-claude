@@ -19,22 +19,26 @@ public final class DaemonClient: @unchecked Sendable {
         self.timeout = timeout
     }
 
+    /// `confirm_action` has no client timeout: in the chat window it waits for the owner's answer,
+    /// and giving up here would let a late "allow" run an action claude was told had failed.
     public func call(_ name: String, _ args: JSON) async throws -> JSON {
-        try await request("tool.call", .object(["name": .string(name), "arguments": args]))
+        try await request("tool.call", .object(["name": .string(name), "arguments": args]),
+                          timeout: name == "confirm_action" ? nil : timeout)
     }
 
     /// Asks the daemon whether the Safari extension is connected and whether the daemon itself
     /// (the process launchd runs, not the caller) has the Accessibility permission.
     public func daemonStatus() async throws -> (extensionConnected: Bool, axTrusted: Bool) {
-        let r = try await request("status", .object([:]))
+        let r = try await request("status", .object([:]), timeout: timeout)
         return (r["extensionConnected"]?.bool ?? false, r["axTrusted"]?.bool ?? false)
     }
 
-    private func request(_ method: String, _ params: JSON) async throws -> JSON {
+    /// `timeout` nil waits until the daemon replies or the socket fails.
+    private func request(_ method: String, _ params: JSON, timeout: TimeInterval?) async throws -> JSON {
         let id = lock.withLock { () -> Int in defer { nextId += 1 }; return nextId }
         let timedOut = lock.withLock { Flag() }
         do {
-            return try await withTimeout(timedOut) { [self] in
+            return try await withTimeout(timedOut, timeout) { [self] in
                 let ws = try await connectedTask()
                 try await send(ws, .req(id: id, method: method, params: params))
                 while true {
@@ -45,7 +49,7 @@ public final class DaemonClient: @unchecked Sendable {
                 }
             }
         } catch {
-            if timedOut.value { throw RPCError.timeout("daemon did not reply within \(timeout)s") }
+            if timedOut.value { throw RPCError.timeout("daemon did not reply within \(timeout ?? 0)s") }
             if let e = error as? RPCError {
                 // A reply from the daemon (or a local RPCError): the socket is still healthy.
                 throw e
@@ -101,16 +105,17 @@ public final class DaemonClient: @unchecked Sendable {
 
     /// Races `op` against the timeout. On timeout the socket is dropped so a pending receive
     /// throws and the group can unwind; the next call reconnects.
-    private func withTimeout<T: Sendable>(_ flag: Flag, _ op: @escaping @Sendable () async throws -> T) async throws -> T {
+    private func withTimeout<T: Sendable>(_ flag: Flag, _ timeout: TimeInterval?,
+                                          _ op: @escaping @Sendable () async throws -> T) async throws -> T {
         try await withTaskCancellationHandler {
           try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask { try await op() }
-            group.addTask { [timeout, self] in
+            if let timeout { group.addTask { [self] in
                 try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 flag.set()
                 drop()
                 throw RPCError.timeout("timeout")
-            }
+            } }
             defer { group.cancelAll() }
             return try await group.next()!
           }
