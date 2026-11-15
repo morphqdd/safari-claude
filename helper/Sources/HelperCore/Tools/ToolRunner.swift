@@ -169,6 +169,7 @@ private struct Run {
 
     func find() async throws -> JSON {
         let q = try req("query")
+        try await status("Ищу «\(q)»")
         let r = try await ext("page.find", ["query": .string(q)])
         return Self.text(findLines(r))
     }
@@ -208,6 +209,7 @@ private struct Run {
 
     func wait() async throws -> JSON {
         if let cond = try str("for", required: false) {
+            try await status("Жду «\(cond)»")
             let deadline = Date().addingTimeInterval(findTimeout)
             while true {
                 let r = try await ext("page.find", ["query": .string(cond)])
@@ -218,6 +220,7 @@ private struct Run {
         }
         guard let ms = args["ms"]?.int else { throw RPCError.badRequest("wait: missing ms or for") }
         let clamped = min(max(ms, 0), 30000)
+        try await status("Жду")
         try await sleep(Double(clamped) / 1000)
         return Self.text("waited \(clamped) ms")
     }
