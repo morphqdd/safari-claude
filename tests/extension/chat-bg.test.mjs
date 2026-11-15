@@ -290,6 +290,43 @@ test("turnEndAndStopRefusePendingCards", async () => {
   p.msg({ type: "confirmReply", id: id2, decision: "allow" });
 });
 
+test("linkLossMidTurnEndsWaitAndRefusesCards", async () => {
+  const t = setup({ tabs: { 7: { id: 7, url: "https://a.example/" } } });
+  vm.runInContext("state.agentTab = 7", t.ctx);
+  const p = chatPort();
+  t.L.connect(p);
+  p.msg({ type: "send", text: "hi" });
+  const r = t.SCLink.onRequest("chat.confirm", { kind: "key", combo: "enter" });
+  await ticks();
+  const id = p.posted.at(-1).id;
+  t.SCLink.onClose();
+  assert.deepEqual(j(await r), { decision: "deny" });
+  assert.equal(p.posted.at(-2).type, "cardClosed");
+  assert.equal(p.posted.at(-2).id, id);
+  assert.equal(p.posted.at(-1).type, "error");
+  assert.ok(p.posted.at(-1).text.length > 0);
+  // Reconnect attempts that fail again do not repeat the error.
+  const n = p.posted.length;
+  t.SCLink.onClose();
+  assert.equal(p.posted.length, n);
+});
+
+test("linkLossWithoutTurnIsSilent", async () => {
+  const t = setup();
+  const p = chatPort();
+  t.L.connect(p);
+  p.msg({ type: "send", text: "hi" });
+  t.SCLink.onEvent("chat.turnEnd", {});
+  const n = p.posted.length;
+  t.SCLink.onClose();
+  assert.equal(p.posted.length, n);
+  // A refused send (busy) starts no turn either.
+  p.msg({ type: "send", text: "again" });
+  t.SCLink.onEvent("chat.busy", {});
+  t.SCLink.onClose();
+  assert.equal(p.posted.length, n + 1);
+});
+
 test("backgroundStartClearsSitesOnce", async () => {
   const storage = fakeStorage();
   storage.store["sc.sitesOnce"] = ["left.example"];

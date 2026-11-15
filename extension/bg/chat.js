@@ -4,6 +4,8 @@
   const cards = new Map(); // id -> { card, kind, resolve }
   let cardSeq = 0;
   let opening = null;
+  // From a sent message to chat.turnEnd; a lost link must not leave the page waiting.
+  let turn = false;
 
   const ANSWERS = { site: ["once", "always", "no"], other: ["allow", "deny"] };
   const answers = (kind) => (kind === "site" ? ANSWERS.site : ANSWERS.other);
@@ -72,7 +74,8 @@
   function onPortMessage(port, m, deps) {
     switch (m?.type) {
       case "send":
-        if (!deps.sendEvent("chat.send", { text: String(m.text ?? "") })) port.postMessage({ type: "error", text: NO_LINK });
+        if (deps.sendEvent("chat.send", { text: String(m.text ?? "") })) turn = true;
+        else port.postMessage({ type: "error", text: NO_LINK });
         break;
       case "new":
         deps.sendEvent("chat.new", {});
@@ -91,6 +94,7 @@
   function onDaemonEvent(name, data, deps) {
     if (!String(name).startsWith("chat.")) return false;
     const type = name.slice("chat.".length);
+    if (type === "turnEnd" || type === "busy") turn = false;
     if (type === "turnEnd") {
       refuseAll(true);
       // The daemon also sends site.clearOnce; this covers a lost link or a crashed daemon.
@@ -98,6 +102,15 @@
     }
     post({ ...(data ?? {}), type });
     return true;
+  }
+
+  // The daemon link closed: its turnEnd will never come, and no card answer can reach it.
+  function onLinkLost(deps) {
+    refuseAll(true);
+    if (!turn) return;
+    turn = false;
+    post({ type: "error", text: NO_LINK });
+    clearSitesOnce(deps);
   }
 
   // Sites allowed "once" must not outlive the turn (storage.local survives restarts).
@@ -130,5 +143,5 @@
     });
   }
 
-  globalThis.SCChat = { openChat, onPort, onDaemonEvent, confirm, onWindowRemoved, clearSitesOnce };
+  globalThis.SCChat = { openChat, onPort, onDaemonEvent, confirm, onWindowRemoved, clearSitesOnce, onLinkLost };
 })();

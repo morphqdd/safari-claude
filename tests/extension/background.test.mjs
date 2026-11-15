@@ -28,6 +28,18 @@ test("linkIsConnectedAndSendEventResult", () => {
   assert.equal(L.isConnected(), false);
 });
 
+test("linkReportsClose", () => {
+  const { ctx, socks } = loadLink();
+  const L = ctx.SCLink;
+  let closed = 0;
+  L.onClose = () => { closed++; };
+  L.connect();
+  socks[0].readyState = 1;
+  socks[0].onclose();
+  assert.equal(closed, 1);
+  assert.equal(L.isConnected(), false);
+});
+
 function loadBackground(connected) {
   let listener;
   const sent = [];
