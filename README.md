@@ -1,74 +1,30 @@
 # Safari Agent
 
-Локальный MCP-сервер для Claude Code, который управляет одной вкладкой Safari («вкладкой агента»): читает страницу, кликает, вводит текст. Состоит из трёх частей:
+Claude in Safari for Claude Code. Claude can open pages in your real Safari, read them, click, type, scroll and take screenshots, while you keep working. A visible Claude cursor and status badge show what it is doing. It runs on your Claude subscription through Claude Code, with no API key.
 
-- `helper/` — Swift-бинарник `safari-claude-helper` (режимы `daemon`, `mcp`, `install`, `uninstall`, `status`). Демон запускается через launchd по сокету `127.0.0.1:47821` и сам завершается без активности.
-- `extension/` — Safari Web Extension (Manifest V2, постоянная фоновая страница).
-- `app/` — контейнерное macOS-приложение «Safari Agent», в которое упаковано расширение.
+## How it works
 
-## Требования
+- `extension/` is a Safari Web Extension (Manifest V2, persistent background page). It reads the page and performs DOM actions.
+- `helper/` is a Swift binary, `safari-claude-helper`. It is the MCP server (`safari`) for Claude Code and a small daemon that launchd starts on demand. Clicks go through macOS Accessibility, so they are real (`isTrusted`) and do not bring Safari to the front.
+- `app/` is the macOS container app that ships the extension.
 
-- macOS с установленным Xcode (проверено на Xcode 27.2) и Safari 26.
-- Claude Code (`claude`), по умолчанию ищется `/opt/homebrew/bin/claude`, иначе из `PATH`.
-- Apple ID (бесплатный Personal Team) для стабильной подписи — желательно, но не обязательно.
+## Install
 
-## Установка
+1. Build and install the app: `DEVELOPMENT_TEAM=<your team id> scripts/build-app.sh`. A free Apple ID (Personal Team) is enough. Open `~/Applications/Safari Agent.app` once.
+2. In Safari settings, enable the Safari Agent extension and allow it on all websites.
+3. Install the helper: `cd helper && swift build -c release && .build/release/safari-claude-helper install`. This registers the LaunchAgent and the `safari` MCP server in Claude Code.
+4. In System Settings, under Privacy & Security > Accessibility, enable `safari-claude-helper`.
 
-1. Xcode → Settings → Accounts: войдите с Apple ID (Personal Team). Узнайте Team ID.
-2. Соберите приложение и установите в `~/Applications`:
-   ```
-   DEVELOPMENT_TEAM=<TEAM_ID> scripts/build-app.sh
-   ```
-   Без `DEVELOPMENT_TEAM` сборка подписывается ad-hoc; тогда в Safari нужно включать Разработка → «Разрешить неподписанные расширения» (сбрасывается при каждом запуске Safari). `scripts/build-app.sh --no-install` только собирает в `build/`.
-3. Откройте `~/Applications/Safari Agent.app` один раз.
-4. Safari → Настройки → Расширения: включите «Safari Agent» и разрешите доступ ко всем сайтам.
-5. Установите хелпер:
-   ```
-   cd helper && swift build -c release && .build/release/safari-claude-helper install
-   ```
-   Команда копирует бинарник в `~/.local/bin`, подписывает его (сертификат Apple Development, если есть, иначе ad-hoc), создаёт токен, регистрирует LaunchAgent и выполняет `claude mcp add --scope user safari -- ~/.local/bin/safari-claude-helper mcp`. Если регистрация не удалась, команда будет напечатана для ручного запуска.
-6. Системные настройки → Конфиденциальность и безопасность → Универсальный доступ: включите `safari-claude-helper`. При ad-hoc подписи разрешение сбрасывается после каждой пересборки.
+Check the setup with `safari-claude-helper status`. Remove everything with `safari-claude-helper uninstall`.
 
-## Проверка
+## Safety
 
-```
-safari-claude-helper status
-```
+- Risky actions (payments, form submits, deletes, new sites) go through the `confirm_action` tool. Never allow it permanently, and never allow `mcp__safari__*` as a whole.
+- Banking and password manager sites are blocked by default.
+- Press Stop on the page badge or the toolbar button to halt the agent.
 
-Показывает: загружен ли LaunchAgent, выдан ли Accessibility, есть ли токен, подключено ли расширение Safari. Чтобы узнать состояние расширения, `status` подключается к сокету `127.0.0.1:47821`, поэтому launchd запускает демон (socket activation), если он не работал; без активности демон сам завершится. Затем в новой сессии `claude`: «открой example.com во вкладке агента, прочитай страницу и нажми на ссылку».
+## Limitations
 
-## Разрешения Claude Code — важно
-
-Рискованные действия (оплата, отправка, удаление, новый сайт) проходят через инструмент `mcp__safari__confirm_action`, и защита держится на том, что Claude Code каждый раз спрашивает вас перед его вызовом.
-
-- Никогда не выбирайте «don't ask again» / «always allow» для `mcp__safari__confirm_action`.
-- Никогда не разрешайте `mcp__safari__*` целиком (ни в диалоге, ни в `settings.json`): это включает и `confirm_action`, и тогда проверки риска и списка сайтов перестают что-либо значить.
-
-Остановить агента можно кнопкой «Стоп» на странице или кнопкой расширения «Safari Agent» на панели инструментов Safari (её страница не может скрыть или подделать). После «Стоп» все дальнейшие действия этой сессии отклоняются, пока блокировка не освободится (2 минуты без действий или выход из сессии Claude).
-
-## Удаление
-
-```
-safari-claude-helper uninstall
-```
-
-Выгружает LaunchAgent, удаляет бинарник, токен и регистрацию MCP. Приложение `~/Applications/Safari Agent.app` и разрешение Accessibility удалите вручную.
-
-## Известные ограничения
-
-- Реальные («доверенные») клики и ввод используются, только когда вкладка агента видима в своём окне и Safari **не** на переднем плане (вы работаете в другом приложении); для клавиатуры также нужно, чтобы окно было в фокусе Safari и фокус был внутри страницы. В остальных случаях (фоновая вкладка, Safari на переднем плане) действия идут через DOM (синтетические события), которые некоторые сайты игнорируют.
-- Сочетания с Cmd/Ctrl, кроме Cmd+A/C/V/X/Z, никогда не отправляются реальными нажатиями (чтобы не задеть Cmd+W, Cmd+Q и т. п. самого Safari) — только DOM-событиями.
-- Курсор агента не анимируется внутри iframe.
-- Чат-панели пока нет (запланирована на фазу 2).
-- Пока Safari в фоне, он не сообщает, где у него клавиатурный фокус, поэтому настоящие нажатия клавиш на практике не используются: ввод идёт DOM-событиями. На сайтах, которые принимают только настоящие нажатия, ввод может не сработать.
-
-## Проверено
-
-2026-11-15, macOS 26.6, Safari 26.6, подпись Personal Team:
-
-- клик настоящим нажатием (AXPress, `isTrusted`) в фоновой вкладке, Safari не выходит вперёд;
-- разрешение «Универсальный доступ» сохраняется после пересборки и переустановки helper;
-- ввод кириллицы и эмодзи через DOM, в том числе когда Википедия заменяет поле поиска другим элементом;
-- скриншот активной вкладки (PNG около 1,3 МБ);
-- кнопка Stop на плашке и на панели Safari прерывает текущее действие и все следующие;
-- запрос разрешения на сайт, отказ на устаревший ref, Cmd+W уходит в DOM, курсор агента виден.
+- Typing uses DOM events, because Safari does not report keyboard focus while it is in the background. Sites that accept only real key presses may ignore it.
+- Screenshots work only for the active tab of a window.
+- No chat panel inside Safari yet.
