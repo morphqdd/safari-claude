@@ -16,7 +16,7 @@
 
   function agent(deps) {
     const id = deps.state.agentTab;
-    if (id == null) throw err("no_agent_tab", "Нет вкладки агента: вызовите tab_create или tab_select");
+    if (id == null) throw err("no_agent_tab", "\u041d\u0435\u0442 \u0432\u043a\u043b\u0430\u0434\u043a\u0438 \u0430\u0433\u0435\u043d\u0442\u0430: \u0432\u044b\u0437\u043e\u0432\u0438\u0442\u0435 tab_create \u0438\u043b\u0438 tab_select");
     return id;
   }
 
@@ -26,7 +26,7 @@
     let protocol = null;
     try { protocol = new URL(url).protocol; } catch { /* not a URL */ }
     if (protocol !== "http:" && protocol !== "https:") {
-      throw err("bad_request", "Разрешены только адреса http, https и about:blank");
+      throw err("bad_request", "\u0420\u0430\u0437\u0440\u0435\u0448\u0435\u043d\u044b \u0442\u043e\u043b\u044c\u043a\u043e \u0430\u0434\u0440\u0435\u0441\u0430 http, https \u0438 about:blank");
     }
   }
 
@@ -43,18 +43,24 @@
 
   async function toContent(deps, tabId, method, params) {
     const msg = { method, params };
+    // Safari may resolve undefined (instead of rejecting) when no content script listens.
+    const inject = async () => {
+      for (const file of CONTENT_FILES) {
+        await deps.browser.tabs.executeScript(tabId, { file, allFrames: true });
+      }
+      return deps.sendToTab(tabId, msg);
+    };
     let res;
     try {
       res = await deps.sendToTab(tabId, msg);
     } catch (e) {
       if (!NO_RECEIVER.test(String(e?.message ?? e))) throw e;
-      for (const file of CONTENT_FILES) {
-        await deps.browser.tabs.executeScript(tabId, { file, allFrames: true });
-      }
-      res = await deps.sendToTab(tabId, msg);
+      res = await inject();
     }
-    if (res && res.error) throw res.error;
-    return res ?? {};
+    if (res == null) res = await inject();
+    if (res == null) throw err("internal", "content script not available in this tab (restricted page?)");
+    if (res.error) throw res.error;
+    return res;
   }
 
   const NO_LOAD_MS = 3000;
@@ -62,8 +68,9 @@
   // `start()` performs the navigation and returns the tab id. The onUpdated listener is armed
   // first. Resolves after a `loading` (or url change) followed by `complete`; if no loading
   // starts within 3 s the navigation is treated as same-document/no-op and resolves anyway.
-  // `fresh` (new tab): a `complete` alone is enough, including one seen before create returned.
-  function whenLoaded(browser, start, { fresh = false } = {}) {
+  // `fresh` (new tab): a `complete` alone is enough, including one seen before create returned,
+  // but not the initial about:blank one (unless `allowBlank`).
+  function whenLoaded(browser, start, { fresh = false, allowBlank = false } = {}) {
     return new Promise((resolve, reject) => {
       let tabId = null;
       let loading = false;
@@ -81,7 +88,7 @@
       };
       const armHard = () => {
         if (hardTimer == null) {
-          hardTimer = setTimeout(() => finish(reject, err("timeout", "Страница не загрузилась за 30 с")), LOAD_TIMEOUT_MS);
+          hardTimer = setTimeout(() => finish(reject, err("timeout", "\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u0430 \u043d\u0435 \u0437\u0430\u0433\u0440\u0443\u0437\u0438\u043b\u0430\u0441\u044c \u0437\u0430 30 \u0441")), LOAD_TIMEOUT_MS);
         }
       };
       const see = (info) => {
@@ -90,7 +97,17 @@
           clearTimeout(idleTimer);
           armHard();
         }
-        if (info.status === "complete" && (loading || fresh)) finish(resolve);
+        if (info.status === "complete") {
+          if (fresh) freshComplete();
+          else if (loading) finish(resolve);
+        }
+      };
+      const freshComplete = async () => {
+        try {
+          const t = await browser.tabs.get(tabId);
+          if (t.status !== "complete") return;
+          if (allowBlank || t.url !== "about:blank") finish(resolve);
+        } catch { /* tab gone: the hard timer reports it */ }
       };
       function on(id, info) {
         if (tabId == null) early.push([id, info]);
@@ -105,7 +122,7 @@
           if (done) return;
           if (fresh) {
             armHard();
-            if ((await browser.tabs.get(id)).status === "complete") finish(resolve);
+            await freshComplete();
           } else if (!loading) {
             idleTimer = setTimeout(() => finish(resolve), NO_LOAD_MS);
           }
@@ -144,14 +161,14 @@
           return tab.id;
         };
         if (!params.url) return { tabId: await make() };
-        await whenLoaded(browser, make, { fresh: true });
+        await whenLoaded(browser, make, { fresh: true, allowBlank: params.url === "about:blank" });
         return { tabId: state.agentTab };
       }
       case "tabs.select": {
         try {
           await browser.tabs.get(params.tabId);
         } catch {
-          throw err("not_found", `Вкладка ${params.tabId} не найдена`);
+          throw err("not_found", `\u0412\u043a\u043b\u0430\u0434\u043a\u0430 ${params.tabId} \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430`);
         }
         setAgent(deps, params.tabId);
         return {};
@@ -159,8 +176,9 @@
       case "tab.state": {
         const id = agent(deps);
         const t = await browser.tabs.get(id);
-        const w = await browser.windows.get(t.windowId);
-        return { tabId: id, url: t.url, title: t.title, activeInWindow: !!t.active, windowFocused: !!w.focused };
+        // windows.get(...).focused is false for every window when Safari is not the active app.
+        const last = await browser.windows.getLastFocused();
+        return { tabId: id, url: t.url, title: t.title, activeInWindow: !!t.active, windowFocused: last.id === t.windowId };
       }
       case "navigate": {
         const id = agent(deps);
@@ -183,19 +201,19 @@
             return id;
           });
         } else {
-          throw err("bad_request", "navigate: нужен url или action");
+          throw err("bad_request", "navigate: \u043d\u0443\u0436\u0435\u043d url \u0438\u043b\u0438 action");
         }
         return urlTitle(browser, id);
       }
       case "tab.screenshot": {
         const id = agent(deps);
         const t = await browser.tabs.get(id);
-        if (!t.active) throw err("background_tab", "Вкладка агента в фоне: скриншот невозможен");
+        if (!t.active) throw err("background_tab", "\u0412\u043a\u043b\u0430\u0434\u043a\u0430 \u0430\u0433\u0435\u043d\u0442\u0430 \u0432 \u0444\u043e\u043d\u0435: \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u0435\u043d");
         return { dataUrl: await browser.tabs.captureVisibleTab(t.windowId, { format: "png" }) };
       }
       default:
         if (CONTENT_METHODS.has(method)) return toContent(deps, agent(deps), method, params);
-        throw err("bad_request", `Неизвестный метод ${method}`);
+        throw err("bad_request", `\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043c\u0435\u0442\u043e\u0434 ${method}`);
     }
   }
 

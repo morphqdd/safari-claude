@@ -45,13 +45,14 @@ function fakeBrowser({ tabs = [], windowFocused = true, syncCompleteOnCreate = f
       onUpdated: { addListener: (f) => listeners.updated.push(f), removeListener: (f) => { listeners.updated = listeners.updated.filter((x) => x !== f); } },
       onRemoved: { addListener: (f) => listeners.removed.push(f) },
     },
-    windows: { get: async (id) => ({ id, focused: windowFocused }), getLastFocused: async () => ({ id: 1 }) },
+    // Safari reports focused=false for every window while Safari is not the active app; only getLastFocused is reliable.
+    windows: { get: async (id) => ({ id, focused: false }), getLastFocused: async () => ({ id: windowFocused ? 1 : 999 }) },
   };
   function fire(id, status) {
     byId.get(id).status = status;
     for (const f of [...listeners.updated]) f(id, { status }, byId.get(id));
   }
-  return { browser, calls, listeners, fire };
+  return { browser, calls, listeners, fire, byId };
 }
 
 function fakeTimers() {
@@ -152,6 +153,9 @@ test("tabStateAndList", async () => {
   const { H, deps, state } = setup({ windowFocused: false, tabs: [{ id: 5, windowId: 1, active: true, url: "u", title: "t" }] });
   state.agentTab = 5;
   assert.deepEqual(await H.handle("tab.state", {}, deps), { tabId: 5, url: "u", title: "t", activeInWindow: true, windowFocused: false });
+  const f = setup({ windowFocused: true, tabs: [{ id: 5, windowId: 1, active: true, url: "u", title: "t" }] });
+  f.state.agentTab = 5;
+  assert.equal((await f.H.handle("tab.state", {}, f.deps)).windowFocused, true);
   const l = await H.handle("tabs.list", {}, deps);
   assert.deepEqual(l.tabs, [{ tabId: 5, windowId: 1, url: "u", title: "t", active: true, isAgent: true }]);
 });
@@ -395,3 +399,40 @@ test("agentTabChangeToleratesOverlayFailure", async () => {
   assert.equal(state.agentTab, 6);
 });
 
+
+test("undefined reply from sendMessage injects content scripts and retries", async () => {
+  let n = 0;
+  const { H, deps, state, fb } = setup({ tabs: [{ id: 5, active: true }] }, async () => (n++ === 0 ? undefined : { text: "hi" }));
+  state.agentTab = 5;
+  assert.deepEqual(await H.handle("page.text", {}, deps), { text: "hi" });
+  assert.equal(fb.calls.executeScript.length, 6);
+});
+
+test("still-undefined reply after injection is an internal error", async () => {
+  const { H, deps, state } = setup({ tabs: [{ id: 5, active: true }] }, async () => undefined);
+  state.agentTab = 5;
+  await assert.rejects(H.handle("page.text", {}, deps), (e) => e.code === "internal" && /content script not available/.test(e.message));
+});
+
+test("tabs.create with url ignores the initial about:blank complete", async () => {
+  const t = setup({ tabs: [{ id: 1, active: true }] });
+  t.fb.browser.tabs.create = async (o) => {
+    const tab = { id: 50, windowId: 1, active: false, status: "loading", url: "about:blank" };
+    await t.fb.browser.tabs.query({}); // keep fake plumbing: register the tab
+    t.fb.byId.set(50, tab);
+    setTimeout(() => t.fb.fire(50, "complete"), 0);
+    setTimeout(() => { tab.url = o.url; t.fb.fire(50, "loading"); t.fb.fire(50, "complete"); }, 20);
+    return tab;
+  };
+  let done = false;
+  const p = t.H.handle("tabs.create", { url: "https://x/" }, t.deps).then((r) => { done = true; return r; });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(done, false);
+  assert.deepEqual(await p, { tabId: 50 });
+});
+
+test("background page scripts are pure ASCII (Safari mis-decodes non-ASCII there)", async () => {
+  const { readdirSync } = await import("node:fs");
+  const files = ["extension/background.js", ...readdirSync("extension/bg").map((f) => `extension/bg/${f}`)];
+  for (const f of files) assert.ok(!/[^\x00-\x7f]/.test(readFileSync(f, "utf8")), `${f} has non-ASCII`);
+});
