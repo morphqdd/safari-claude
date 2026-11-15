@@ -32,6 +32,7 @@
     const log = $("log"), input = $("input"), send = $("send"), stop = $("stop");
     let entries = [];
     let current = null; // assistant entry being streamed
+    let currentEl = null;
     let waiting = false;
     const cards = new Map(); // id -> { el, resolved }
 
@@ -125,10 +126,10 @@
           if (!current) {
             current = { kind: "assistant", text: "" };
             entries.push(current);
-            current.el = line("assistant", "");
+            currentEl = line("assistant", "");
           }
           current.text += String(m.text ?? "");
-          current.el.textContent = current.text;
+          currentEl.textContent = current.text;
           stick();
           save();
           break;
