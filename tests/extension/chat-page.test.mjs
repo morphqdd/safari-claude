@@ -285,3 +285,16 @@ test("backoffResetsAfterMessage", async () => {
   onDis();
   assert.equal(timers[0].ms, 500);
 });
+
+test("sendDuringReconnectGapShowsError", async () => {
+  const timers = [];
+  const p = await page(undefined, { timers });
+  await p.drop(); // port gone, reconnect pending
+  await p.type("привет");
+  p.key("Enter");
+  await tick();
+  assert.equal(p.sent.length, 0);
+  assert.match(p.$(".user").textContent, /привет/);
+  assert.match(p.$(".error").textContent, /Связь с расширением прервалась/);
+  assert.equal(p.$("#send").disabled, false);
+});

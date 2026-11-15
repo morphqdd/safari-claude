@@ -93,7 +93,10 @@
         reconnectSoon();
       }
     }
-    const post = (m) => { try { port?.postMessage(m); } catch { /* port gone: reconnect is scheduled */ } };
+    const post = (m) => {
+      try { if (port) { port.postMessage(m); return true; } } catch { /* port gone: reconnect is scheduled */ }
+      return false;
+    };
 
     function submit() {
       const text = input.value.trim();
@@ -101,7 +104,7 @@
       input.value = "";
       add("user", text);
       setWaiting(true);
-      post({ type: "send", text });
+      if (!post({ type: "send", text })) { add("error", LOST); setWaiting(false); }
     }
 
     function closeCard(id, answer) {
