@@ -16,15 +16,33 @@
     if ((await SC.sites.isAllowed(host)) !== "allowed") {
       throw err("site_not_allowed", `Разрешите сайт: confirm_action kind=site domain=${host}`);
     }
-    el.scrollIntoView({ block: "center" });
-    await SC.overlay?.moveTo(el);
     const marker = `__sc_m_${ref}`;
-    el.classList.add(marker);
-    return { marker, risk: SC.classifyRisk(el) };
+    clearMarker(marker);
+    try {
+      el.scrollIntoView({ block: "center" });
+      await SC.overlay?.moveTo(el);
+      el.classList.add(marker);
+      return { marker, risk: SC.classifyRisk(el) };
+    } catch (e) {
+      clearMarker(marker);
+      throw e;
+    }
   };
 
+  function clearMarker(marker, root = document) {
+    for (const el of root.querySelectorAll(`.${marker}`)) el.classList.remove(marker);
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) clearMarker(marker, el.shadowRoot);
+      if (el.tagName === "IFRAME") {
+        try {
+          if (el.contentDocument) clearMarker(marker, el.contentDocument);
+        } catch {}
+      }
+    }
+  }
+
   SC.release = (ref) => {
-    SC.resolve(ref)?.classList.remove(`__sc_m_${ref}`);
+    clearMarker(`__sc_m_${ref}`);
     SC.overlay?.pulse();
   };
 
@@ -109,9 +127,12 @@
     init.key = key;
     const target = document.activeElement ?? document.body;
     const w = win(target);
-    target.dispatchEvent(new w.KeyboardEvent("keydown", init));
+    const notCancelled = target.dispatchEvent(new w.KeyboardEvent("keydown", init));
     target.dispatchEvent(new w.KeyboardEvent("keyup", init));
-    if (key === "Enter") target.form?.requestSubmit?.() ?? target.closest?.("form")?.requestSubmit?.();
+    if (key === "Enter" && notCancelled && target.tagName !== "TEXTAREA" && !target.isContentEditable && !target.hasAttribute?.("contenteditable")) {
+      const f = target.form ?? target.closest?.("form");
+      f?.requestSubmit?.();
+    }
   };
 
   SC.value = (ref) => {

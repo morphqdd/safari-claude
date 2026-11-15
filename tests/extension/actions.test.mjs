@@ -80,7 +80,7 @@ test("domKeyEnterSubmitsForm", async () => {
   const w = await load(`<form><input id="a" aria-label="q"></form>`);
   const f = w.document.querySelector("form");
   let n = 0;
-  f.requestSubmit = () => n++;
+  f.requestSubmit = () => { n++; };
   w.document.getElementById("a").focus();
   const keys = [];
   w.document.addEventListener("keydown", (e) => keys.push(e.key + (e.metaKey ? "+meta" : "")));
@@ -101,4 +101,55 @@ test("scrollAndValue", async () => {
   assert.equal(by.top, 600);
   w.SC.scroll({ direction: "up", amount: 100 });
   assert.equal(by.top, -100);
+});
+
+test("domKeyEnterTextareaDoesNotSubmit", async () => {
+  const w = await load(`<form><textarea id="a"></textarea></form>`);
+  let n = 0;
+  w.document.querySelector("form").requestSubmit = () => { n++; };
+  w.document.getElementById("a").focus();
+  w.SC.domKey("Enter");
+  assert.equal(n, 0);
+});
+
+test("domKeyEnterPreventedDoesNotSubmit", async () => {
+  const w = await load(`<form><input id="a"></form>`);
+  let n = 0;
+  w.document.querySelector("form").requestSubmit = () => { n++; };
+  const a = w.document.getElementById("a");
+  a.focus();
+  a.addEventListener("keydown", (e) => e.preventDefault());
+  w.SC.domKey("Enter");
+  assert.equal(n, 0);
+});
+
+test("releaseAfterNewSnapshotRemovesMarker", async () => {
+  const w = await load("<button>A</button>");
+  w.SC.snapshot("interactive");
+  await w.SC.prepare("e1", "click");
+  w.document.body.insertAdjacentHTML("afterbegin", "<a href='/x'>L</a>");
+  w.SC.snapshot("interactive"); // e1 now another element
+  w.SC.release("e1");
+  assert.equal(w.document.querySelectorAll(".__sc_m_e1").length, 0);
+});
+
+test("prepareFailureLeavesNoMarker", async () => {
+  const w = await load("<button>A</button>");
+  w.SC.snapshot("interactive");
+  await w.SC.prepare("e1", "click");
+  w.SC.overlay = { moveTo: async () => { throw new Error("boom"); } };
+  await assert.rejects(w.SC.prepare("e1", "click"));
+  assert.equal(w.document.querySelectorAll(".__sc_m_e1").length, 0);
+});
+
+test("repeatedPrepareLeavesOneMarker", async () => {
+  const w = await load("<button>A</button><a href='/x'>L</a>");
+  w.SC.snapshot("interactive");
+  await w.SC.prepare("e1", "click");
+  w.document.body.insertAdjacentHTML("afterbegin", "<i></i>");
+  w.document.body.removeChild(w.document.querySelector("i"));
+  w.document.querySelector("button").remove();
+  w.SC.snapshot("interactive"); // e1 is now the link
+  await w.SC.prepare("e1", "click");
+  assert.equal(w.document.querySelectorAll(".__sc_m_e1").length, 1);
 });
