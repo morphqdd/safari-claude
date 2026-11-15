@@ -109,4 +109,24 @@ private func decode(_ s: String?) throws -> JSON {
         #expect(required("click") == ["ref"])
         #expect(required("type") == ["ref", "text"])
     }
+
+    func desc(_ n: String) -> String {
+        ToolCatalog.tools.first { $0["name"]?.string == n }?["description"]?.string ?? ""
+    }
+
+    @Test func keyExampleUsesSupportedModifiers() {
+        let d = desc("key")
+        #expect(!d.contains("Meta"))
+        for m in ["Cmd+", "Shift+", "Alt+", "Ctrl+"] { #expect(d.contains(m), "\(m)") }
+    }
+
+    @Test func findAndWaitDescribeSubstringMatch() {
+        #expect(desc("find").contains("case-insensitive substring"))
+        let wait = ToolCatalog.tools.first { $0["name"]?.string == "wait" }
+        #expect(wait?["inputSchema"]?["properties"]?["for"]?["description"]?.string?.contains("case-insensitive substring") == true)
+    }
+
+    @Test func noTabGroupWording() {
+        for t in ToolCatalog.tools { #expect(t["description"]?.string?.contains("tab group") == false, "\(t["name"]?.string ?? "?")") }
+    }
 }

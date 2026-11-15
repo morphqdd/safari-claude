@@ -44,6 +44,24 @@ public enum Installer {
         exists(preferredClaude) ? preferredClaude : "claude"
     }
 
+    /// False when `source` already is `destination` (running `install` from the installed binary).
+    public static func needsCopy(source: URL, destination: URL) -> Bool {
+        source.standardizedFileURL.resolvingSymlinksInPath().path
+            != destination.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    /// Absolute path of the running executable (not argv[0], which may be relative or a bare name from PATH).
+    public static func currentExecutable() -> URL {
+        var size: UInt32 = 0
+        _ = _NSGetExecutablePath(nil, &size)
+        var buf = [CChar](repeating: 0, count: Int(size) + 1)
+        if _NSGetExecutablePath(&buf, &size) == 0 {
+            return URL(fileURLWithPath: String(cString: buf)).standardizedFileURL.resolvingSymlinksInPath()
+        }
+        return (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0]))
+            .standardizedFileURL.resolvingSymlinksInPath()
+    }
+
     // MARK: Filesystem
 
     public static func writePlist(binary: URL, to file: URL = Paths.plist) throws {
@@ -87,20 +105,28 @@ public enum Installer {
 
     // MARK: Commands
 
-    public static func install(binarySource: URL) throws {
-        let fm = FileManager.default
-        let dest = Paths.installedBinary
-        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
-        try fm.copyItem(at: binarySource, to: dest)
-        print("Бинарник скопирован: \(dest.path)")
-
+    static func sign(_ dest: URL) throws {
         if let id = pickSigningIdentity(from: run("security", ["find-identity", "-v", "-p", "codesigning"]).out) {
             try runChecked("codesign", ["--force", "-s", id, dest.path])
             print("Подписан сертификатом Apple Development (\(id))")
         } else {
             try runChecked("codesign", ["--force", "-s", "-", dest.path])
             print("⚠️ ad-hoc signature: Accessibility permission will reset on every rebuild")
+        }
+    }
+
+    public static func install(binarySource: URL) throws {
+        let fm = FileManager.default
+        let dest = Paths.installedBinary
+        try fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if needsCopy(source: binarySource, destination: dest) {
+            if fm.fileExists(atPath: dest.path) { try fm.removeItem(at: dest) }
+            try fm.copyItem(at: binarySource, to: dest)
+            print("Бинарник скопирован: \(dest.path)")
+            try sign(dest)
+        } else {
+            // Re-signing the running binary in place is unsafe; it was signed when first installed.
+            print("Запущен установленный бинарник: копирование и подпись пропущены (\(dest.path))")
         }
 
         _ = try Auth().loadOrCreateToken()

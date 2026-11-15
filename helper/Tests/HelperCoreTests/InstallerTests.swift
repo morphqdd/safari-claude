@@ -61,4 +61,24 @@ import Foundation
         #expect(!FileManager.default.fileExists(atPath: file.path))
         try? FileManager.default.removeItem(at: dir)
     }
+
+    @Test func installSkipsCopyWhenRunFromInstalledBinary() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sc-same-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let bin = dir.appendingPathComponent("safari-claude-helper")
+        FileManager.default.createFile(atPath: bin.path, contents: Data("x".utf8))
+        let link = dir.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: bin)
+        #expect(!Installer.needsCopy(source: bin, destination: bin))
+        #expect(!Installer.needsCopy(source: URL(fileURLWithPath: dir.path + "/./safari-claude-helper"), destination: bin))
+        #expect(!Installer.needsCopy(source: link, destination: bin))
+        #expect(Installer.needsCopy(source: URL(fileURLWithPath: "/tmp/other/safari-claude-helper"), destination: bin))
+    }
+
+    @Test func currentExecutableIsAbsolute() {
+        let u = Installer.currentExecutable()
+        #expect(u.path.hasPrefix("/"))
+        #expect(FileManager.default.fileExists(atPath: u.path))
+    }
 }

@@ -40,7 +40,7 @@ func runMCP() -> Never {
     dispatchMain()
 }
 func runInstall() -> Never {
-    do { try Installer.install(binarySource: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.resolvingSymlinksInPath()) }
+    do { try Installer.install(binarySource: Installer.currentExecutable()) }
     catch { FileHandle.standardError.write(Data("install: \(error)\n".utf8)); exit(1) }
     exit(0)
 }
