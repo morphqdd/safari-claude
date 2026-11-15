@@ -15,6 +15,7 @@ const out = document.getElementById('log');
 const W = new URLSearchParams(location.search).get('w') || '?';
 document.title = 'Events Fixture ' + W;
 if (new URLSearchParams(location.search).get('mark') === 'btn') document.getElementById('btn').classList.add('__sc_m_live');
+if (new URLSearchParams(location.search).get('focus') === 'inp') document.getElementById('inp').focus();
 function log(e) {
   const d = {
     w: W, type: e.type, target: e.target.id || e.target.nodeName, isTrusted: e.isTrusted,

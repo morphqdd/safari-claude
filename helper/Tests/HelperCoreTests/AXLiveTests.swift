@@ -58,4 +58,53 @@ import Testing
         #expect(throws: RPCError.self) { try act.press(marker: "__sc_m_absent", pageURL: url) }
         #expect(throws: RPCError.self) { try act.press(marker: "__sc_m_live", pageURL: "http://127.0.0.1:1/nope") }
     }
+
+    @Test func typesCyrillicIntoFocusedField() async throws {
+        guard ProcessInfo.processInfo.environment["SC_LIVE_AX"] == "1" else {
+            print("SKIP AXLive: SC_LIVE_AX != 1")
+            return
+        }
+        var retries = 0
+        while Frontmost.isSafari() {
+            retries += 1
+            if retries > 3 {
+                print("SKIP AXLive: Safari is frontmost (owner using it); live test NOT run")
+                return
+            }
+            try await Task.sleep(for: .seconds(5))
+        }
+
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let server = root.appendingPathComponent("tests/fixtures/server.py").path
+        let logPath = NSTemporaryDirectory() + "sc-ax-live-\(UUID().uuidString).log"
+        FileManager.default.createFile(atPath: logPath, contents: nil)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+        proc.arguments = [server, logPath]
+        try proc.run()
+        defer { proc.terminate() }
+
+        func log() -> String { (try? String(contentsOfFile: logPath, encoding: .utf8)) ?? "" }
+        func wait(_ secs: Int, _ cond: () -> Bool) async throws -> Bool {
+            for _ in 0..<(secs * 4) { if cond() { return true }; try await Task.sleep(for: .milliseconds(250)) }
+            return cond()
+        }
+        try await Task.sleep(for: .seconds(1))
+
+        let open = Process()
+        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        open.arguments = ["-g", "-a", "Safari", "http://127.0.0.1:47830/?w=type&focus=inp"]
+        try open.run(); open.waitUntilExit()
+        #expect(try await wait(15) { log().contains("\"loaded\"") })
+        try await Task.sleep(for: .seconds(1))
+        #expect(!Frontmost.isSafari())
+
+        try AXActuator().postText("Привет 😀")
+        #expect(try await wait(5) { log().contains("Привет 😀\"") })
+        let inputLine = log().split(separator: "\n").last { $0.contains("\"type\":\"input\"") }.map(String.init) ?? ""
+        #expect(inputLine.contains("Привет 😀"))
+        let keyLine = log().split(separator: "\n").first { $0.contains("\"type\":\"keydown\"") }.map(String.init) ?? ""
+        #expect(keyLine.contains("\"isTrusted\":true"))
+    }
 }

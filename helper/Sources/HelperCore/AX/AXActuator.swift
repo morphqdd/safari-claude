@@ -3,6 +3,8 @@ import ApplicationServices
 public protocol Actuator {
     func press(marker: String, pageURL: String) throws
     func isSafariFrontmost() -> Bool
+    func postText(_ text: String) throws
+    func postCombo(_ combo: KeyCombo) throws
 }
 
 public final class AXActuator: Actuator {
