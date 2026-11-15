@@ -65,4 +65,27 @@ extension DaemonTests {
         let r = try await client.call("tabs_list", .object([:]))
         #expect(r["isError"]?.bool == false)
     }
+
+    @Test func clientSendsChatKey() async throws {
+        final class Box: @unchecked Sendable {
+            let l = NSLock(); var first: String?
+            func set(_ t: String) { l.withLock { if first == nil { first = t } } }
+            var value: String? { l.withLock { first } }
+        }
+        let box = Box()
+        let listener = try Listener.tcp(port: 0)
+        listener.onConnection = { c in
+            c.onText = { t in
+                box.set(t)
+                if let d = try? JSONEncoder().encode(Message.welcome) { c.send(String(decoding: d, as: UTF8.self)) }
+            }
+        }
+        listener.start(queue: DispatchQueue(label: "test.dc.chat"))
+        defer { withExtendedLifetime(listener) {} }
+        let client = DaemonClient(port: listener.boundPort, token: "tok", timeout: 0.5, chatKey: "k")
+        _ = try? await client.call("tabs_list", .object([:]))
+        let text = try #require(box.value)
+        let msg = try JSONDecoder().decode(Message.self, from: Data(text.utf8))
+        guard case .hello(.mcp, _, "k") = msg else { Issue.record("wrong hello \(text)"); return }
+    }
 }

@@ -23,7 +23,8 @@ func runMCP() -> Never {
         FileHandle.standardError.write(Data("mcp: cannot load token: \(error)\n".utf8))
         exit(1)
     }
-    let client = DaemonClient(port: port, token: token)
+    let client = DaemonClient(port: port, token: token,
+                              chatKey: ProcessInfo.processInfo.environment["SC_CHAT_KEY"])
     let server = MCPServer(forward: { name, args in try await client.call(name, args) })
     Task {
         do {

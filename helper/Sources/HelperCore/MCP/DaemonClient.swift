@@ -5,15 +5,17 @@ import Foundation
 public final class DaemonClient: @unchecked Sendable {
     private let port: UInt16
     private let token: String
+    private let chatKey: String?
     private let timeout: TimeInterval
     private let session = URLSession(configuration: .ephemeral)
     private var task: URLSessionWebSocketTask?
     private var nextId = 1
     private let lock = NSLock()
 
-    public init(port: UInt16 = 47821, token: String, timeout: TimeInterval = 120) {
+    public init(port: UInt16 = 47821, token: String, timeout: TimeInterval = 120, chatKey: String? = nil) {
         self.port = port
         self.token = token
+        self.chatKey = chatKey
         self.timeout = timeout
     }
 
@@ -68,7 +70,7 @@ public final class DaemonClient: @unchecked Sendable {
         lock.withLock { task = ws }
         ws.resume()
         do {
-            try await send(ws, .hello(role: .mcp, token: token))
+            try await send(ws, .hello(role: .mcp, token: token, chat: chatKey))
             guard case .welcome = try await receive(ws) else {
                 throw RPCError.internal("unexpected handshake reply")
             }

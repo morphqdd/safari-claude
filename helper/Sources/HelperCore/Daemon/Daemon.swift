@@ -119,7 +119,7 @@ public final class Daemon {
 
     private func handleHello(_ client: Client, _ text: String) {
         client.helloTimer?.cancel()
-        guard let hello = decode(text), case .hello(let role, _) = hello,
+        guard let hello = decode(text), case .hello(let role, _, _) = hello,
               auth.authorize(hello: hello, origin: client.conn.origin) else {
             client.conn.close(code: 4001)
             return
