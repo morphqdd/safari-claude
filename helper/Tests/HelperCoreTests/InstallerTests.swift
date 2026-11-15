@@ -51,6 +51,19 @@ import Foundation
         #expect(Installer.claudeExecutable(exists: { _ in false }) == "claude")
     }
 
+    @Test func claudePathRoundTrips() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sc-cp-\(UUID().uuidString)")
+        let file = dir.appendingPathComponent("claude-path")
+        try Installer.writeClaudePath("/opt/x/bin/claude", to: file)
+        #expect(Installer.readClaudePath(from: file) == "/opt/x/bin/claude")
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    @Test func claudePathFallsBackWhenMissing() {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("sc-none-\(UUID().uuidString)")
+        #expect(Installer.readClaudePath(from: file) == Installer.claudeExecutable())
+    }
+
     @Test func writesAndRemovesPlist() throws {
         // Explicit paths: never mutates the global Paths.root (other suites run in parallel).
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("sc-inst-\(UUID().uuidString)")
