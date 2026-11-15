@@ -68,7 +68,7 @@ public struct RPCError: Codable, Equatable, Error {
     public static func cancelled(_ message: String = "cancelled") -> RPCError { .init(code: "cancelled", message: message) }
     public static func timeout(_ message: String = "timeout") -> RPCError { .init(code: "timeout", message: message) }
     public static func badRequest(_ message: String = "bad_request") -> RPCError { .init(code: "bad_request", message: message) }
-    public static func internal_(_ message: String = "internal") -> RPCError { .init(code: "internal", message: message) }
+    public static func `internal`(_ message: String = "internal") -> RPCError { .init(code: "internal", message: message) }
 }
 
 public enum Message: Codable, Equatable {

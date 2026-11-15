@@ -20,11 +20,11 @@ public final class Auth {
         try fm.createDirectory(at: paths.support, withIntermediateDirectories: true)
         var bytes = [UInt8](repeating: 0, count: 32)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
-            throw RPCError.internal_("random generation failed")
+            throw RPCError.`internal`("random generation failed")
         }
         let token = bytes.map { String(format: "%02x", $0) }.joined()
         guard fm.createFile(atPath: file.path, contents: Data(token.utf8), attributes: [.posixPermissions: 0o600]) else {
-            throw RPCError.internal_("cannot write token file")
+            throw RPCError.`internal`("cannot write token file")
         }
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return token
