@@ -161,7 +161,7 @@ git commit -m "spike: extension wake/keep-alive, capture, AX class lookup result
   - `parsesMaskedClientText`: the RFC 6455 §5.7 example masked "Hello" (`81 85 37 fa 21 3d 7f 9f 4d 51 58`) → opcode 1, payload "Hello", buffer empty afterwards.
   - `incompleteReturnsNil`: the first 3 bytes of the above → nil, buffer unchanged.
   - `encodes16BitLength`: a 300-byte payload → header `81 7E 01 2C`.
-  - `handshakeAcceptKey`: key `dGhlIHNhbXBsZSBub25jZQ==` → `Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzOo=`, and origin is parsed from the `Origin:` header.
+  - `handshakeAcceptKey`: key `dGhlIHNhbXBsZSBub25jZQ==` → `Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=`, and origin is parsed from the `Origin:` header.
   - `tcpListenerEchoes`: start `Listener.tcp(port: 0)` (ephemeral port, exposed as `boundPort`), connect with `URLSessionWebSocketTask`, send "ping-text", have the server echo it via `onText` → `send`, and assert the reply is received within 2 s.
 - [ ] **Step 2: Run** `swift test --filter WS` and `swift test --filter Listener`. Expected: FAIL.
 - [ ] **Step 3: Implement.** Handshake SHA-1 via `CryptoKit.Insecure.SHA1`. I/O is non-blocking, with `DispatchSourceRead` per fd on the given serial queue. `Listener.launchd` calls `launch_activate_socket(name, &fds, &count)` and uses `fds[0]`. `Listener.tcp` binds `127.0.0.1` (for development and tests). Add `var boundPort: UInt16`.
