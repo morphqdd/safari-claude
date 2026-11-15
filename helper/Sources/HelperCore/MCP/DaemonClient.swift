@@ -62,6 +62,7 @@ public final class DaemonClient: @unchecked Sendable {
         let existing = lock.withLock { task }
         if let existing { return existing }
         let ws = session.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)")!)
+        ws.maximumMessageSize = WSFrame.maxPayload // default 1 MiB rejects screenshots
         lock.withLock { task = ws }
         ws.resume()
         do {
