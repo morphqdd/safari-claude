@@ -47,7 +47,12 @@
   function mount() {
     const host = document.createElement("div");
     host.id = "__sc_overlay";
-    host.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;";
+    const hs = {
+      position: "fixed", top: "0", right: "0", bottom: "0", left: "0", width: "auto", height: "auto",
+      margin: "0", padding: "0", border: "0", "z-index": "2147483647", "pointer-events": "none",
+      display: "block", visibility: "visible", opacity: "1", transform: "none", filter: "none",
+    };
+    for (const k in hs) host.style.setProperty(k, hs[k], "important");
     const root = host.attachShadow({ mode: "closed" });
     const style = mk("style", null, root);
     style.textContent = CSS;
@@ -61,14 +66,20 @@
     const label = mk("span", "txt", bar);
     const stop = mk("button", null, bar);
     stop.textContent = "Стоп";
-    stop.addEventListener("click", () => {
+    stop.addEventListener("click", async () => {
+      if (stop.disabled) return;
       stop.disabled = true;
-      label.textContent = "Остановлено";
-      st.stopped = true;
-      try { browser.runtime.sendMessage({ event: "stop" }); } catch {}
+      try {
+        await browser.runtime.sendMessage({ event: "stop" });
+        label.textContent = "Остановлено";
+        st.stopped = true;
+      } catch {
+        label.textContent = "Не удалось остановить";
+        stop.disabled = false;
+      }
     });
     document.documentElement.appendChild(host);
-    st = { host, hl, cur, label, stop, x: null, y: null, origTitle: document.title, timers: new Set(), stopped: false };
+    st = { host, hl, cur, label, stop, x: null, y: null, origTitle: document.title, timers: new Set(), pending: new Set(), stopped: false };
   }
 
   function later(fn, ms) {
@@ -81,6 +92,7 @@
     if (text == null) {
       if (!st) return;
       for (const t of st.timers) clearTimeout(t);
+      for (const r of st.pending) r();
       st.host.remove();
       const t = document.title;
       document.title = t.startsWith("● ") ? t.slice(2) : t;
@@ -119,7 +131,12 @@
     cur.style.transform = `translate(${cx}px,${cy}px)`;
     st.x = cx; st.y = cy;
     if (reduced()) return Promise.resolve();
-    return new Promise((res) => later(res, FLY_MS));
+    return new Promise((res) => {
+      const s = st;
+      const done = () => { s.pending.delete(done); res(); };
+      s.pending.add(done);
+      later(done, FLY_MS);
+    });
   }
 
   function doPulse() {
@@ -133,45 +150,11 @@
     return { left: r.left, top: r.top, width: r.width, height: r.height };
   };
 
-  function forward(msg) {
-    try { window.top.postMessage({ __sc_overlay: msg }, "*"); } catch {}
-  }
-
-  if (isTop) {
-    window.addEventListener("message", (ev) => {
-      const m = ev.data && typeof ev.data === "object" ? ev.data.__sc_overlay : null;
-      if (!m || typeof m.op !== "string") return;
-      if (m.op === "status") doStatus(typeof m.text === "string" ? m.text : null);
-      else if (m.op === "pulse") doPulse();
-      else if (m.op === "moveTo" && m.rect) {
-        let dx = 0, dy = 0;
-        for (const f of document.querySelectorAll("iframe,frame")) {
-          if (f.contentWindow === ev.source) {
-            const b = f.getBoundingClientRect();
-            dx = b.left; dy = b.top;
-            break;
-          }
-        }
-        const r = m.rect;
-        doMove({ left: r.left + dx, top: r.top + dy, width: r.width, height: r.height });
-      }
-    });
-  }
-
+  // Subframes are no-ops: the overlay lives only in the top frame (no page-spoofable channel).
   SC.overlay = {
-    status(text) {
-      if (isTop) doStatus(text);
-      else forward({ op: "status", text: text ?? null });
-    },
-    moveTo(el) {
-      if (isTop) return doMove(rectOf(el));
-      forward({ op: "moveTo", rect: rectOf(el) });
-      return new Promise((res) => setTimeout(res, FLY_MS));
-    },
-    pulse() {
-      if (isTop) doPulse();
-      else forward({ op: "pulse" });
-    },
+    status(text) { if (isTop) doStatus(text); },
+    moveTo(el) { return isTop ? doMove(rectOf(el)) : Promise.resolve(); },
+    pulse() { if (isTop) doPulse(); },
     _stopButtonForTest() { return st?.stop ?? null; },
   };
 })();
