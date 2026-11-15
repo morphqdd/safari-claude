@@ -7,10 +7,15 @@ final class FakeActuator: Actuator, @unchecked Sendable {
     private(set) var calls: [String] = []
     var frontmost = false
     var pressError: Error?
+    /// The first `pressNotFoundTimes` presses throw not_found, later ones succeed.
+    var pressNotFoundTimes = 0
+    private var presses = 0
     var webFocus = true
     func record(_ s: String) { lock.lock(); calls.append(s); lock.unlock() }
     func press(marker: String, pageURL: String) throws {
         record("press:\(marker):\(pageURL)")
+        lock.lock(); presses += 1; let n = presses; lock.unlock()
+        if n <= pressNotFoundTimes { throw RPCError.notFound("not yet") }
         if let pressError { throw pressError }
     }
     func isSafariFrontmost() -> Bool { frontmost }
@@ -176,6 +181,31 @@ private struct Rig {
         let b = Rig()
         #expect(try await b.run("key", ["combo": .string("Enter")]) == "pressed Enter (trusted)")
         #expect(b.actuator.calls == ["postCombo:Enter"])
+    }
+
+    @Test func clickRetriesAXLookupUntilMarkerAppears() async throws {
+        let rig = Rig()
+        rig.actuator.pressNotFoundTimes = 3
+        #expect(try await rig.run("click", ["ref": .string("e1")]) == "clicked (trusted)")
+        #expect(rig.actuator.calls.count == 4)
+        #expect(!rig.ext.methods.contains("el.domClick"))
+    }
+
+    @Test func clickFallsBackToDomAfterSixAXMisses() async throws {
+        let rig = Rig()
+        rig.actuator.pressNotFoundTimes = 100
+        #expect(try await rig.run("click", ["ref": .string("e1")]) == "clicked (dom)")
+        #expect(rig.actuator.calls.count == 6)
+    }
+
+    @Test func screenshotOfBackgroundTabFailsImmediatelyWithoutOverlayStatus() async throws {
+        let rig = Rig(active: false)
+        let t0 = Date()
+        do { _ = try await rig.runner.call(name: "screenshot", arguments: .object([:]), link: rig.link); Issue.record("expected error") }
+        catch let e as RPCError { #expect(e.code == "background_tab") }
+        #expect(Date().timeIntervalSince(t0) < 1)
+        #expect(!rig.ext.methods.contains("overlay.status"))
+        #expect(!rig.ext.methods.contains("tab.screenshot"))
     }
 
     @Test func screenshotStripsDataUrlPrefix() async throws {

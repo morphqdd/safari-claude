@@ -6,22 +6,25 @@ public final class ToolRunner: ToolHandling {
     private let actuator: Actuator
     private let pollInterval: TimeInterval
     private let findTimeout: TimeInterval
+    private let pressRetryDelay: TimeInterval
 
     public init(actuator: Actuator) {
         self.actuator = actuator
         self.pollInterval = 0.5
         self.findTimeout = 10
+        self.pressRetryDelay = 0.15
     }
 
-    init(actuator: Actuator, pollInterval: TimeInterval, findTimeout: TimeInterval) {
+    init(actuator: Actuator, pollInterval: TimeInterval, findTimeout: TimeInterval, pressRetryDelay: TimeInterval = 0.001) {
         self.actuator = actuator
         self.pollInterval = pollInterval
         self.findTimeout = findTimeout
+        self.pressRetryDelay = pressRetryDelay
     }
 
     public func call(name: String, arguments: JSON, link: ExtensionLink) async throws -> JSON {
         let run = Run(actuator: actuator, link: link, args: arguments, tool: name,
-                      pollInterval: pollInterval, findTimeout: findTimeout)
+                      pollInterval: pollInterval, findTimeout: findTimeout, pressRetryDelay: pressRetryDelay)
         switch name {
         case "tabs_list": return try await run.tabsList()
         case "tab_create": return try await run.tabCreate()
@@ -49,6 +52,12 @@ private struct Run {
     let tool: String
     let pollInterval: TimeInterval
     let findTimeout: TimeInterval
+    let pressRetryDelay: TimeInterval
+
+    /// Best-effort diagnostics to stderr (SafariClaude.log): path decisions only, no page content.
+    static func log(_ s: String) {
+        FileHandle.standardError.write(Data("tool: \(s)\n".utf8))
+    }
 
     // MARK: helpers
 
@@ -181,6 +190,11 @@ private struct Run {
     }
 
     func screenshot() async throws -> JSON {
+        // Reject a background tab before the overlay status, which can stall on throttled background tabs.
+        let state = try await ext("tab.state")
+        if state["activeInWindow"]?.bool != true {
+            throw RPCError.backgroundTab("Вкладка агента в фоне: скриншот невозможен")
+        }
         try await status("Делаю снимок")
         let r = try await ext("tab.screenshot")
         var data = resultText(r, "dataUrl")
@@ -273,6 +287,23 @@ private struct Run {
         }
     }
 
+    /// WebKit updates the AX tree asynchronously after the extension marks the element, so a missing
+    /// web area/marker is retried (6 tries, `pressRetryDelay` apart) before giving up. Sleeps only here.
+    static let pressAttempts = 6
+
+    func pressWithRetry(marker: String, pageURL: String) async throws {
+        for attempt in 1...Self.pressAttempts {
+            try checkCancelled()
+            do {
+                try actuator.press(marker: marker, pageURL: pageURL)
+                return
+            } catch let e as RPCError where e.code == "not_found" {
+                if attempt == Self.pressAttempts { throw e }
+                try await Task.sleep(nanoseconds: UInt64(pressRetryDelay * 1_000_000_000))
+            }
+        }
+    }
+
     func click(checkRisk: Bool) async throws -> JSON {
         let ref = try req("ref")
         try await status("Нажимаю \(ref)")
@@ -281,15 +312,23 @@ private struct Run {
             if state["activeInWindow"]?.bool == true, let marker = prep["marker"]?.string {
                 try checkCancelled()
                 do {
-                    try actuator.press(marker: marker, pageURL: resultText(state, "url"))
+                    try await pressWithRetry(marker: marker, pageURL: resultText(state, "url"))
+                    Self.log("click \(ref): trusted AXPress")
                     return true
                 } catch let e as RPCError where e.code == "not_found" {
                     // The element was not reachable through AX, so nothing was pressed: use DOM events.
+                    Self.log("click \(ref): DOM fallback (AX not_found after \(Self.pressAttempts) tries: \(e.message))")
+                } catch let e as RPCError where e.code == "cancelled" {
+                    throw e
+                } catch is CancellationError {
+                    throw RPCError.cancelled("Пользователь нажал «Стоп»")
                 } catch {
                     // The press may have happened; a DOM retry could click twice.
                     let detail = (error as? RPCError)?.message ?? "\(error)"
                     throw RPCError.internal("click may or may not have happened: \(detail); check the page with read_page before retrying")
                 }
+            } else {
+                Self.log("click \(ref): DOM (tab not active in window or no marker)")
             }
             _ = try await ext("el.domClick", ["ref": .string(ref)])
             return false
@@ -301,10 +340,16 @@ private struct Run {
     /// and Safari's keyboard focus is inside the agent tab's web content (not the address bar etc.).
     func useKeys() async throws -> Bool {
         let state = try await ext("tab.state")
-        guard state["activeInWindow"]?.bool == true, state["windowFocused"]?.bool == true,
-              !actuator.isSafariFrontmost() else { return false }
+        let active = state["activeInWindow"]?.bool == true
+        let focused = state["windowFocused"]?.bool == true
+        guard active, focused, !actuator.isSafariFrontmost() else {
+            Self.log("keys: DOM (activeInWindow=\(active) windowFocused=\(focused) safariFrontmost=\(actuator.isSafariFrontmost()))")
+            return false
+        }
         try checkCancelled()
-        return actuator.webContentHasFocus(pageURL: resultText(state, "url"))
+        let webFocus = actuator.webContentHasFocus(pageURL: resultText(state, "url"))
+        Self.log("keys: \(webFocus ? "trusted" : "DOM (keyboard focus not in page web area)")")
+        return webFocus
     }
 
     /// Cmd/Ctrl combos other than Cmd+A/C/V/X/Z could reach Safari's own UI (Cmd+W, Cmd+Q, Cmd+L...),
