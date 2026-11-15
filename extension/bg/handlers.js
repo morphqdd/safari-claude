@@ -11,13 +11,34 @@
   const CONTENT_METHODS = new Set([
     "page.snapshot", "page.find", "page.text", "page.scroll",
     "el.prepare", "el.release", "el.submitRisk", "el.domClick", "el.focus",
-    "el.domType", "el.domKey", "el.value", "site.allow", "overlay.status",
+    "el.domType", "el.domKey", "el.value", "site.allow", "site.check", "overlay.status",
   ]);
 
   function agent(deps) {
     const id = deps.state.agentTab;
-    if (id == null) throw err("no_agent_tab", "Нет вкладки агента: вызовите tabs_create или tabs_select");
+    if (id == null) throw err("no_agent_tab", "Нет вкладки агента: вызовите tab_create или tab_select");
     return id;
+  }
+
+  // Only http(s) pages and about:blank may be opened.
+  function checkURL(url) {
+    if (url === "about:blank") return;
+    let protocol = null;
+    try { protocol = new URL(url).protocol; } catch { /* not a URL */ }
+    if (protocol !== "http:" && protocol !== "https:") {
+      throw err("bad_request", "Разрешены только адреса http, https и about:blank");
+    }
+  }
+
+  // Switches the agent tab; the old tab's overlay is hidden (best-effort).
+  function setAgent(deps, id) {
+    const old = deps.state.agentTab;
+    deps.state.agentTab = id;
+    if (old != null && old !== id) {
+      Promise.resolve()
+        .then(() => deps.sendToTab(old, { method: "overlay.status", params: { text: null } }))
+        .catch(() => {});
+    }
   }
 
   async function toContent(deps, tabId, method, params) {
@@ -116,10 +137,10 @@
         const [active] = await browser.tabs.query({ active: true, windowId: win.id });
         const opts = { active: false };
         if (active) { opts.index = active.index + 1; opts.windowId = active.windowId; }
-        if (params.url) opts.url = params.url;
+        if (params.url) { checkURL(params.url); opts.url = params.url; }
         const make = async () => {
           const tab = await browser.tabs.create(opts);
-          state.agentTab = tab.id;
+          setAgent(deps, tab.id);
           return tab.id;
         };
         if (!params.url) return { tabId: await make() };
@@ -132,7 +153,7 @@
         } catch {
           throw err("not_found", `Вкладка ${params.tabId} не найдена`);
         }
-        state.agentTab = params.tabId;
+        setAgent(deps, params.tabId);
         return {};
       }
       case "tab.state": {
@@ -144,6 +165,7 @@
       case "navigate": {
         const id = agent(deps);
         if (params.url) {
+          checkURL(params.url);
           await whenLoaded(browser, async () => { await browser.tabs.update(id, { url: params.url }); return id; });
         } else if (["back", "forward", "reload"].includes(params.action)) {
           await whenLoaded(browser, async () => {

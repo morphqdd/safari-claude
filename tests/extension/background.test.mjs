@@ -29,11 +29,14 @@ test("linkIsConnectedAndSendEventResult", () => {
 });
 
 function loadBackground(connected) {
-  let listener;
+  let listener, clicked;
   const sent = [];
   const ctx = vm.createContext({
     console, Promise,
-    browser: { runtime: { onMessage: { addListener: (f) => (listener = f) } } },
+    browser: {
+      runtime: { onMessage: { addListener: (f) => (listener = f) } },
+      browserAction: { onClicked: { addListener: (f) => (clicked = f) } },
+    },
     SCHandlers: { watch() {}, handle() {} },
     SCLink: {
       connect() {},
@@ -41,7 +44,7 @@ function loadBackground(connected) {
     },
   });
   vm.runInContext(readFileSync("extension/background.js", "utf8"), ctx);
-  return { listener, sent };
+  return { listener, sent, clicked: () => clicked() };
 }
 
 test("backgroundStopConnected", async () => {
@@ -61,4 +64,10 @@ test("backgroundStopDisconnected", async () => {
 test("backgroundIgnoresOtherMessages", () => {
   const { listener } = loadBackground(true);
   assert.equal(listener({ x: 1 }), undefined);
+});
+
+test("toolbarButtonSendsStop", () => {
+  const { clicked, sent } = loadBackground(true);
+  clicked();
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["stop", {}]]);
 });

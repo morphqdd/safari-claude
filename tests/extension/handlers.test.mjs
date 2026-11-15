@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 function load(file, extra = {}) {
-  const ctx = vm.createContext({ console, JSON, Promise, ...extra });
+  const ctx = vm.createContext({ console, JSON, Promise, URL, ...extra });
   vm.runInContext(readFileSync(file, "utf8"), ctx);
   return ctx;
 }
@@ -341,3 +341,57 @@ test("background: idle hides overlay, content stop forwards event", async () => 
   onMsg({ event: "stop" });
   assert.deepEqual(j(ws.sent.at(-1)), { type: "event", name: "stop", data: {} });
 });
+
+// ---- final-review fixes ----
+test("siteCheckRoutesToContent", async () => {
+  const sent = [];
+  const { H, deps, state } = setup({ tabs: [{ id: 5 }] }, async (id, m) => { sent.push([id, m.method]); return {}; });
+  state.agentTab = 5;
+  assert.deepEqual(await H.handle("site.check", {}, deps), {});
+  assert.deepEqual(sent, [[5, "site.check"]]);
+});
+
+test("main: site.check maps to SC.checkSite", async () => {
+  const { listeners } = loadMain({ SC: { checkSite: async () => { throw { code: "site_not_allowed", message: "m" }; } } });
+  assert.deepEqual(j(await listeners[0]({ method: "site.check", params: {} })), { error: { code: "site_not_allowed", message: "m" } });
+});
+
+test("noAgentTabMessageNamesTools", async () => {
+  const { H, deps } = setup({});
+  await assert.rejects(H.handle("page.snapshot", {}, deps), (e) => /tab_create/.test(e.message) && /tab_select/.test(e.message) && !/tabs_/.test(e.message));
+});
+
+test("urlSchemesRestricted", async () => {
+  const { H, deps, state, fb } = setup({ tabs: [{ id: 5, index: 0, active: true }] });
+  state.agentTab = 5;
+  for (const url of ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x", "about:config", "nonsense"]) {
+    assert.equal(await code(H.handle("navigate", { url }, deps)), "bad_request", url);
+    assert.equal(await code(H.handle("tabs.create", { url }, deps)), "bad_request", url);
+  }
+  assert.equal(fb.calls.update.length + fb.calls.create.length, 0);
+  await H.handle("navigate", { url: "about:blank" }, deps);
+  await H.handle("navigate", { url: "https://b/" }, deps);
+  assert.equal(fb.calls.update.length, 2);
+});
+
+test("agentTabChangeHidesOverlayOnOldTab", async () => {
+  const sent = [];
+  const { H, deps, state } = setup({ tabs: [{ id: 5 }, { id: 6 }, { id: 1, index: 0, active: true }] }, async (id, m) => { sent.push([id, j(m)]); return {}; });
+  await H.handle("tabs.select", { tabId: 5 }, deps);
+  assert.equal(sent.length, 0); // no previous agent tab
+  await H.handle("tabs.select", { tabId: 5 }, deps);
+  assert.equal(sent.length, 0); // same tab
+  await H.handle("tabs.select", { tabId: 6 }, deps);
+  assert.deepEqual(sent, [[5, { method: "overlay.status", params: { text: null } }]]);
+  const r = await H.handle("tabs.create", {}, deps);
+  assert.deepEqual(sent.at(-1), [6, { method: "overlay.status", params: { text: null } }]);
+  assert.equal(state.agentTab, r.tabId);
+});
+
+test("agentTabChangeToleratesOverlayFailure", async () => {
+  const { H, deps, state } = setup({ tabs: [{ id: 5 }, { id: 6 }] }, async () => { throw new Error("gone"); });
+  state.agentTab = 5;
+  await H.handle("tabs.select", { tabId: 6 }, deps);
+  assert.equal(state.agentTab, 6);
+});
+
