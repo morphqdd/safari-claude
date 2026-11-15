@@ -84,10 +84,11 @@ private struct Run {
         return r
     }
 
+    /// Best-effort overlay text, sent without waiting: a throttled background tab may never answer.
     func status(_ text: String) async throws {
         try checkCancelled()
-        _ = try? await link.request("overlay.status", .object(["text": .string(text)]))
-        try checkCancelled()
+        let link = self.link
+        Task.detached { _ = try? await link.request("overlay.status", .object(["text": .string(text)]), timeout: 5) }
     }
 
     func str(_ key: String, required: Bool = true) throws -> String? {
@@ -317,7 +318,7 @@ private struct Run {
                     return true
                 } catch let e as RPCError where e.code == "not_found" {
                     // The element was not reachable through AX, so nothing was pressed: use DOM events.
-                    Self.log("click \(ref): DOM fallback (AX not_found after \(Self.pressAttempts) tries: \(e.message))")
+                    Self.log("click \(ref): DOM fallback (AX \(e.code) after \(Self.pressAttempts) tries)")
                 } catch let e as RPCError where e.code == "cancelled" {
                     throw e
                 } catch is CancellationError {

@@ -81,4 +81,9 @@ import Foundation
         #expect(u.path.hasPrefix("/"))
         #expect(FileManager.default.fileExists(atPath: u.path))
     }
+
+    @Test func mcpAddAlreadyExistsIsRecognized() {
+        #expect(Installer.alreadyRegistered("MCP server safari already exists in user config"))
+        #expect(!Installer.alreadyRegistered("command not found"))
+    }
 }

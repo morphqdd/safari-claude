@@ -14,6 +14,12 @@
     "el.domType", "el.domKey", "el.value", "site.allow", "site.check", "overlay.status",
   ]);
 
+  // Safe to re-send: they only read page state (page.scroll and everything that acts is excluded).
+  const IDEMPOTENT = new Set([
+    "page.snapshot", "page.find", "page.text", "el.prepare", "el.release", "el.value",
+    "el.submitRisk", "site.check", "overlay.status",
+  ]);
+
   function agent(deps) {
     const id = deps.state.agentTab;
     if (id == null) throw err("no_agent_tab", "\u041d\u0435\u0442 \u0432\u043a\u043b\u0430\u0434\u043a\u0438 \u0430\u0433\u0435\u043d\u0442\u0430: \u0432\u044b\u0437\u043e\u0432\u0438\u0442\u0435 tab_create \u0438\u043b\u0438 tab_select");
@@ -43,8 +49,12 @@
 
   async function toContent(deps, tabId, method, params) {
     const msg = { method, params };
-    // Safari may resolve undefined (instead of rejecting) when no content script listens.
+    // Safari may resolve undefined (instead of rejecting) when no content script listens. That is
+    // retried only for read-only methods: after an acting method the page may have navigated and
+    // torn the port down, so an undefined reply there is treated as success without a re-send.
+    let injected = false;
     const inject = async () => {
+      injected = true;
       for (const file of CONTENT_FILES) {
         await deps.browser.tabs.executeScript(tabId, { file, allFrames: true });
       }
@@ -57,8 +67,11 @@
       if (!NO_RECEIVER.test(String(e?.message ?? e))) throw e;
       res = await inject();
     }
-    if (res == null) res = await inject();
-    if (res == null) throw err("internal", "content script not available in this tab (restricted page?)");
+    if (res == null) {
+      if (!IDEMPOTENT.has(method)) return {};
+      if (!injected) res = await inject();
+      if (res == null) throw err("internal", "content script not available in this tab (restricted page?)");
+    }
     if (res.error) throw res.error;
     return res;
   }

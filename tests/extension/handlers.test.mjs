@@ -436,3 +436,24 @@ test("background page scripts are pure ASCII (Safari mis-decodes non-ASCII there
   const files = ["extension/background.js", ...readdirSync("extension/bg").map((f) => `extension/bg/${f}`)];
   for (const f of files) assert.ok(!/[^\x00-\x7f]/.test(readFileSync(f, "utf8")), `${f} has non-ASCII`);
 });
+
+test("undefined reply to an acting method is success with no re-send or injection", async () => {
+  let n = 0;
+  const { H, deps, state, fb } = setup({ tabs: [{ id: 5, active: true }] }, async () => { n++; return undefined; });
+  state.agentTab = 5;
+  assert.deepEqual(await H.handle("el.domClick", { ref: "e1" }, deps), {});
+  assert.equal(n, 1);
+  assert.equal(fb.calls.executeScript.length, 0);
+});
+
+test("NO_RECEIVER then undefined injects only once", async () => {
+  let n = 0;
+  const { H, deps, state, fb } = setup({ tabs: [{ id: 5, active: true }] }, async () => {
+    if (n++ === 0) throw new Error("Could not establish connection");
+    return undefined;
+  });
+  state.agentTab = 5;
+  await assert.rejects(H.handle("page.text", {}, deps), (e) => e.code === "internal");
+  assert.equal(fb.calls.executeScript.length, 6);
+  assert.equal(n, 2);
+});

@@ -208,6 +208,14 @@ private struct Rig {
         #expect(!rig.ext.methods.contains("tab.screenshot"))
     }
 
+    @Test func unansweredOverlayStatusDoesNotDelayActions() async throws {
+        let rig = Rig(hold: ["overlay.status"])
+        let t0 = Date()
+        _ = try await rig.run("read_page", [:])
+        _ = try await rig.run("click", ["ref": .string("e1")])
+        #expect(Date().timeIntervalSince(t0) < 1)
+    }
+
     @Test func screenshotStripsDataUrlPrefix() async throws {
         let rig = Rig(extra: { m, _ in m == "tab.screenshot" ? .success(obj(["dataUrl": .string("data:image/png;base64,QUJD")])) : nil })
         let r = try await rig.runner.call(name: "screenshot", arguments: .object([:]), link: rig.link)

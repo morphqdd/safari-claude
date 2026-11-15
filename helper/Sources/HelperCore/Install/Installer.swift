@@ -40,6 +40,11 @@ public enum Installer {
         ["mcp", "add", "--scope", "user", "safari", "--", binary.path, "mcp"]
     }
 
+    /// `claude mcp add` output meaning the server is already registered.
+    static func alreadyRegistered(_ output: String) -> Bool {
+        output.lowercased().contains("already exists")
+    }
+
     public static func claudeExecutable(exists: (String) -> Bool = { FileManager.default.isExecutableFile(atPath: $0) }) -> String {
         exists(preferredClaude) ? preferredClaude : "claude"
     }
@@ -142,6 +147,8 @@ public enum Installer {
         let r = run(claude, args)
         if r.status == 0 {
             print("MCP-сервер зарегистрирован в Claude Code")
+        } else if alreadyRegistered(r.err + r.out) {
+            print("MCP-сервер уже зарегистрирован")
         } else {
             print("⚠️ Не удалось выполнить регистрацию MCP (\(r.err.trimmingCharacters(in: .whitespacesAndNewlines))).")
             print("Выполните вручную:\n  \(([claude] + args).joined(separator: " "))")
