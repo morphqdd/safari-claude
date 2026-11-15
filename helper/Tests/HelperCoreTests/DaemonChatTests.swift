@@ -347,8 +347,45 @@ private func idles(_ c: FakeConnection) -> Int {
         c.receive(call(1, "confirm_action", args: .object(["kind": .string("click"), "ref": .string("e1")])))
         #expect(await eventually { request(e, "chat.confirm") != nil })
         e.disconnect()
-        #expect(await eventually { response(c, id: 1)?.1 == .cancelled("Пользователь отказал") })
+        // A failure is not the owner's refusal: claude sees why.
+        #expect(await eventually { response(c, id: 1)?.1 == .noExtension(ExtensionLink.noExtensionMessage) })
         #expect(h.toolCalls.isEmpty)
+    }
+
+    @Test func chatConfirmExtensionErrorIsPassedThrough() async {
+        let h = DaemonChatHarness()
+        let e = await h.ext()
+        await h.startTurn(e)
+        let c = await h.mcp(chat: h.key)
+        c.receive(call(1, "confirm_action", args: .object(["kind": .string("click"), "ref": .string("e9")])))
+        #expect(await eventually { request(e, "chat.confirm") != nil })
+        e.receive(.res(id: request(e, "chat.confirm")!.id, result: nil, error: .badRequest("stale ref e9")))
+        #expect(await eventually { response(c, id: 1)?.1 == .badRequest("stale ref e9") })
+        #expect(h.toolCalls.isEmpty)
+    }
+
+    @Test func stopSurvivesChatMCPReconnect() async {
+        let h = DaemonChatHarness()
+        let e = await h.ext()
+        await h.startTurn(e)
+        let c = await h.mcp(chat: h.key)
+        c.receive(call(1))
+        #expect(await eventually { response(c, id: 1) != nil })
+        e.receive(.event(name: "stop", data: empty))
+        #expect(await eventually { h.processes[0].written.count == 2 })
+        // claude's MCP process drops and comes back while the turn is still on.
+        c.disconnect()
+        let c2 = await h.mcp(chat: h.key)
+        c2.receive(call(2))
+        #expect(await eventually { response(c2, id: 2)?.1?.code == "cancelled" })
+        #expect(h.toolCalls.count == 1)
+        #expect(idles(e) == 0)
+        // The turn end releases Safari and clears Stop.
+        h.endTurn()
+        #expect(await eventually { idles(e) == 1 })
+        let a = await h.mcp()
+        a.receive(call(3))
+        #expect(await eventually { response(a, id: 3)?.0 == empty })
     }
 
     @Test func siteOnceUsesAllowOnce() async {

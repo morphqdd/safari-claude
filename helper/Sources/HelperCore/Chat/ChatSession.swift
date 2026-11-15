@@ -34,6 +34,9 @@ public final class ChatSession {
     /// The current process was launched with `--resume` and has not printed `init` yet.
     private var awaitingResume = false
     private var interruptSent = false
+    /// A resumed launch printed an error `result` before `init`; whether the resume failed is decided at exit.
+    private var failedEarly = false
+    static let resumeFailureMarker = "No conversation found"
 
     public var isRunning: Bool { process != nil }
 
@@ -52,6 +55,7 @@ public final class ChatSession {
         interruptMonitor = IdleMonitor(queue: queue, delay: interruptGrace) { [weak self] in
             // The next send resumes the conversation in a new process.
             guard let self, self.turnActive else { return }
+            if self.failedEarly { self.emitExitError(nil, self.process) }
             self.stop()
             self.endTurn()
         }
@@ -98,6 +102,9 @@ public final class ChatSession {
                     "--append-system-prompt", Self.prompt]
         if let resume { args += ["--resume", resume] }
         var env = ProcessInfo.processInfo.environment.filter { ["HOME", "USER", "PATH"].contains($0.key) }
+        // An npm-installed claude is a `#!/usr/bin/env node` script; node lives next to it.
+        let dir = (claudePath as NSString).deletingLastPathComponent
+        env["PATH"] = [dir, env["PATH"] ?? "/usr/bin:/bin"].joined(separator: ":")
         env["SC_CHAT_KEY"] = key
         // ms; a confirm_action card waits for the owner with no timeout end to end.
         env["MCP_TOOL_TIMEOUT"] = "86400000"
@@ -116,6 +123,7 @@ public final class ChatSession {
             process = p
             chatKey = key
             awaitingResume = resume != nil
+            failedEarly = false
             return true
         } catch {
             emit(.error("Не найден claude: \(claudePath)"))
@@ -131,6 +139,7 @@ public final class ChatSession {
         process = nil
         chatKey = nil
         awaitingResume = false
+        failedEarly = false
     }
 
     private func handle(_ line: String, from p: ClaudeProcess) {
@@ -145,8 +154,12 @@ public final class ChatSession {
                 if turnActive { emit(.delta(text)) }
             case .toolUse(let name, let input):
                 if turnActive { emit(.action(tool: name, input: input)) }
-            case .resumeFailed where awaitingResume, .result(true, _) where awaitingResume:
-                restartFresh()
+            case .resumeFailed where awaitingResume && !interruptSent, .result(true, _) where awaitingResume && !interruptSent:
+                // The result can be read before stderr says why; without the marker, wait for the exit.
+                if resumeFailed(p) { restartFresh() } else if turnActive, !failedEarly {
+                    failedEarly = true
+                    interruptMonitor.arm()
+                }
             case .resumeFailed, .result:
                 if turnActive { endTurn() }
                 idleMonitor.arm()
@@ -156,17 +169,29 @@ public final class ChatSession {
 
     private func exited(_ code: Int32, _ p: ClaudeProcess) {
         guard p === process else { return }
-        if awaitingResume, turnActive { restartFresh(); return }
+        if awaitingResume, turnActive, !interruptSent, resumeFailed(p) { restartFresh(); return }
+        let stoppedEarly = awaitingResume && interruptSent
         process = nil
         chatKey = nil
         idleMonitor.disarm()
         guard turnActive else { return }
-        let tail = p.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines)
-        emit(.error(tail.isEmpty ? "claude завершился с кодом \(code)" : tail))
+        // Stop pressed while claude was still starting: nothing to report.
+        if !stoppedEarly { emitExitError(code, p) }
         endTurn()
     }
 
-    /// `--resume` failed: forget the conversation and resend the pending text to a fresh one.
+    /// Only an unknown session id is a resume failure; anything else (not logged in, a crash) keeps the session.
+    private func resumeFailed(_ p: ClaudeProcess) -> Bool {
+        p.stderrTail.contains(Self.resumeFailureMarker)
+    }
+
+    private func emitExitError(_ code: Int32?, _ p: ClaudeProcess?) {
+        let tail = p?.stderrTail.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !tail.isEmpty { emit(.error(tail)) }
+        else { emit(.error(code.map { "claude завершился с кодом \($0)" } ?? "claude не ответил")) }
+    }
+
+    /// `--resume <id>` reported an unknown conversation: forget the conversation and resend the pending text to a fresh one.
     private func restartFresh() {
         stop()
         try? FileManager.default.removeItem(at: sessionFile)
@@ -207,11 +232,14 @@ public final class ChatSession {
             "args": .array([.string("mcp")]),
             "env": .object(["SC_CHAT_KEY": .string(key)]),
         ])])])
+        let data = try JSONEncoder().encode(config)
         try? fm.removeItem(at: file)
-        guard fm.createFile(atPath: file.path, contents: try JSONEncoder().encode(config),
-                            attributes: [.posixPermissions: 0o600]) else {
-            throw RPCError.`internal`("cannot write MCP config")
-        }
+        // Created 0600 by open itself: no moment with umask permissions; O_EXCL|O_NOFOLLOW refuse a planted file.
+        let fd = open(file.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw RPCError.`internal`("cannot write MCP config") }
+        defer { close(fd) }
+        let written = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        guard written == data.count else { throw RPCError.`internal`("cannot write MCP config") }
         return file
     }
 

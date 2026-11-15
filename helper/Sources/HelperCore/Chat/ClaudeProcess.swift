@@ -27,6 +27,8 @@ public final class RealClaudeProcess: ClaudeProcess {
     private let io = DispatchQueue(label: "claude-io")
     private var buffer = Data()
     private var errTail = Data()
+    /// Set on `io` by the exit drain; later readability callbacks read nothing.
+    private var finished = false
     private static let tailLimit = 4096
 
     public static let launcher: ClaudeLauncher = { args, env, cwd in
@@ -45,31 +47,42 @@ public final class RealClaudeProcess: ClaudeProcess {
         // Writing after claude died must fail with EPIPE, not kill the daemon.
         _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
 
+        // Reads go through `poll`+`read` on `io`: FileHandle's availableData raises (and aborts the daemon)
+        // on a read error, and reading on `io` keeps the order of chunks against the final drain at exit.
         stdout.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let data = h.availableData
-            if data.isEmpty { h.readabilityHandler = nil; return }
-            self?.io.async { self?.consume(data) }
+            self?.io.sync { self?.pump(h, into: { $0.consume($1) }) }
         }
         stderr.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let data = h.availableData
-            if data.isEmpty { h.readabilityHandler = nil; return }
-            self?.io.async { self?.appendErr(data) }
+            self?.io.sync { self?.pump(h, into: { $0.appendErr($1) }) }
         }
         process.terminationHandler = { [weak self] p in
             let status = p.terminationStatus
             self?.io.async {
                 guard let self else { return }
+                self.finished = true
                 self.stdout.fileHandleForReading.readabilityHandler = nil
                 self.stderr.fileHandleForReading.readabilityHandler = nil
-                self.appendErr(Self.drain(self.stderr.fileHandleForReading.fileDescriptor))
-                self.consume(self.stdout.fileHandleForReading.readDataToEndOfFile())
+                // What the pipes hold now, without waiting for EOF (an MCP child may still hold them open).
+                self.appendErr(Self.readAvailable(self.stderr.fileHandleForReading.fileDescriptor).data)
+                self.consume(Self.readAvailable(self.stdout.fileHandleForReading.fileDescriptor).data)
                 if !self.buffer.isEmpty { self.deliver(self.buffer); self.buffer.removeAll() }
                 self.onExit?(status)
             }
         }
     }
 
-    public func start() throws { try process.run() }
+    public func start() throws {
+        do { try process.run() } catch {
+            // The handlers retain their handles; without this the six pipe fds would never be closed.
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            for h in [stdin.fileHandleForReading, stdin.fileHandleForWriting, stdout.fileHandleForReading,
+                      stdout.fileHandleForWriting, stderr.fileHandleForReading, stderr.fileHandleForWriting] {
+                try? h.close()
+            }
+            throw error
+        }
+    }
 
     public var stderrTail: String { io.sync { String(decoding: errTail, as: UTF8.self) } }
 
@@ -95,17 +108,30 @@ public final class RealClaudeProcess: ClaudeProcess {
         if !line.isEmpty { onLine?(String(decoding: line, as: UTF8.self)) }
     }
 
-    /// What stderr holds right now, without waiting for EOF (an MCP child may still hold the pipe open).
-    private static func drain(_ fd: Int32) -> Data {
-        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+    /// On `io`: reads what `h` holds and stops the handler at EOF. Nothing after the exit drain.
+    private func pump(_ h: FileHandle, into sink: (RealClaudeProcess, Data) -> Void) {
+        guard !finished else { h.readabilityHandler = nil; return }
+        let (data, eof) = Self.readAvailable(h.fileDescriptor)
+        if !data.isEmpty { sink(self, data) }
+        if eof { h.readabilityHandler = nil }
+    }
+
+    /// Everything readable on `fd` right now, without blocking and without touching its flags;
+    /// `eof` is true once the write end is closed (or the fd is unusable).
+    static func readAvailable(_ fd: Int32) -> (data: Data, eof: Bool) {
         var out = Data()
         var buf = [UInt8](repeating: 0, count: 4096)
         while true {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let r = poll(&pfd, 1, 0)
+            if r < 0 && errno == EINTR { continue }
+            if r <= 0 { return (out, false) }
+            if pfd.revents & Int16(POLLIN | POLLHUP) == 0 { return (out, true) }
             let n = read(fd, &buf, buf.count)
-            if n <= 0 { break }
-            out.append(contentsOf: buf[0..<n])
+            if n > 0 { out.append(contentsOf: buf[0..<n]); continue }
+            if n < 0 && errno == EINTR { continue }
+            return (out, true)
         }
-        return out
     }
 
     private func appendErr(_ data: Data) {

@@ -5,8 +5,8 @@ public enum StreamItem: Equatable {
     case textDelta(String)
     case toolUse(name: String, input: JSON)
     case result(isError: Bool, sessionId: String?)
-    /// Error result with zero turns: what `--resume <unknown id>` prints instead of `init`.
-    /// Only meaningful before `init` of a resumed launch; `ChatSession` decides.
+    /// Error result with zero turns: what `--resume <unknown id>` prints instead of `init`, but also any
+    /// other failure before the first turn. `ChatSession` decides, from stderr, whether the resume failed.
     case resumeFailed
 }
 

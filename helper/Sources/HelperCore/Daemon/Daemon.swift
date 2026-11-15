@@ -225,9 +225,13 @@ public final class Daemon {
 
     /// Asks the owner in the chat window; runs the tool only if allowed. Called off-queue from the call's task.
     private func chatConfirm(_ call: Call, _ args: JSON) async throws -> JSON {
-        // No timeout: the card waits for the owner. Stop cancels the task; a gone extension fails the request.
-        let decision = try? await link.request("chat.confirm", args, timeout: .infinity)["decision"]?.string
+        // No timeout: the card waits for the owner. Stop cancels the task; a gone extension fails the request,
+        // and that failure (like any other) reaches claude as is: only a decision is the owner's refusal.
+        let reply: Result<JSON, Error>
+        do { reply = .success(try await link.request("chat.confirm", args, timeout: .infinity)) }
+        catch { reply = .failure(error) }
         q.sync { call.confirming = false }
+        let decision = try reply.get()["decision"]?.string
         switch decision {
         case "once" where args["kind"]?.string == "site":
             guard let d = args["domain"]?.string else { throw RPCError.badRequest("missing argument: domain") }
@@ -313,7 +317,8 @@ public final class Daemon {
         if owner === client {
             for call in inflight.values { call.responded = true; call.task?.cancel() }
             inflight.removeAll()
-            releaseLock()
+            // Mid-turn the chat keeps Safari (and Stop) until turnEnd: a reconnected chat MCP stays stopped.
+            if chatReserved { owner = nil } else { releaseLock() }
         }
         if clients.isEmpty { exitMonitor.arm() }
     }
