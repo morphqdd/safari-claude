@@ -353,7 +353,7 @@ private struct Run {
         let parsed = try KeyCombo.parse(combo)
         _ = try await ext("site.check")
         // Enter submits forms and Space activates a focused button: both are gated.
-        if (parsed.key == "Enter" || parsed.key == "Space") && !confirmed {
+        if ["Enter", "Space", " "].contains(parsed.key) && !confirmed {
             try await checkSubmitRisk(ref: nil, kind: "key")
         }
         try await status("Нажимаю \(combo)")

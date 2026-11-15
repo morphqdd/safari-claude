@@ -347,6 +347,14 @@ private struct Rig {
         #expect(!rig.ext.methods.contains("el.domKey"))
     }
 
+    @Test func riskyLiteralSpaceViaKeyRequiresConfirmation() async {
+        for combo in [" ", "Shift+ "] {
+            let rig = Rig(submitRisky: true)
+            await expectCode("risky_requires_confirmation") { _ = try await rig.run("key", ["combo": .string(combo)]) }
+            #expect(rig.actuator.calls.isEmpty)
+        }
+    }
+
     @Test func confirmSpacePresses() async throws {
         let rig = Rig(submitRisky: true)
         #expect(try await rig.run("confirm_action", ["kind": .string("key"), "combo": .string("Space")]) == "pressed Space (trusted)")
