@@ -56,10 +56,10 @@ Error codes: `busy`, `no_extension`, `no_agent_tab`, `site_not_allowed`, `risky_
 | method | params | result |
 |---|---|---|
 | `tabs.list` | `{}` | `{tabs:[{tabId,windowId,url,title,active,isAgent}]}` |
-| `tabs.create` | `{url?}` | `{tabId}`. Becomes the agent tab. |
-| `tabs.select` | `{tabId}` | `{}`. Marks as agent tab, does not activate. |
+| `tabs.create` | `{url?}` (http:, https: or about:blank, else `bad_request`) | `{tabId}`. Becomes the agent tab; the previous agent tab's overlay is hidden. |
+| `tabs.select` | `{tabId}` | `{}`. Marks as agent tab, does not activate; the previous agent tab's overlay is hidden. |
 | `tab.state` | `{}` | `{tabId,url,title,activeInWindow:Bool,windowFocused:Bool}` for the agent tab (`windowFocused` = `windows.get(windowId).focused`) |
-| `navigate` | `{url}` or `{action:"back"\|"forward"\|"reload"}` | `{url,title}` after load completes (timeout 30 s) |
+| `navigate` | `{url}` (http:, https: or about:blank, else `bad_request`) or `{action:"back"\|"forward"\|"reload"}` | `{url,title}` after load completes (timeout 30 s; the daemon waits 35 s for `navigate` and `tabs.create`) |
 | `page.snapshot` | `{filter?:"interactive"\|"all"}` | `{text}` (format in Task 9) |
 | `page.find` | `{query}` | `{matches:[{ref,role,name}]}` |
 | `page.text` | `{ref?}` | `{text}` |
@@ -74,9 +74,10 @@ Error codes: `busy`, `no_extension`, `no_agent_tab`, `site_not_allowed`, `risky_
 | `page.scroll` | `{ref?,direction?:"up"\|"down"\|"left"\|"right",amount?:Int}` | `{}` |
 | `tab.screenshot` | `{}` | `{dataUrl}`, or error `background_tab` |
 | `site.allow` | `{domain}` | `{}` |
+| `site.check` | `{}` | `{}`, or error `site_not_allowed` when `SC.sites.isAllowed(location.hostname)` of the agent tab is not `allowed`. Used by `key` before any input. |
 | `overlay.status` | `{text?}` | `{}`. `text:null` hides the overlay (task finished). |
 
-**extension → daemon:** event `stop` `{}`, sent when the owner presses «Стоп».
+**extension → daemon:** event `stop` `{}`, sent when the owner presses «Стоп» in the overlay or clicks the extension's toolbar button. Only the current extension connection's `stop` counts. After Stop every `tool.call` from the lock owner returns `cancelled` until the lock is released (lock idle expiry or owner disconnect); other sessions keep getting `busy`.
 
 **daemon → extension:** event `idle` `{}` when the busy lock is released; the extension hides the overlay (`overlay.status(null)` in the agent tab) and keeps the socket open.
 
@@ -340,7 +341,7 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
     - Interactive = `a[href]`, `button`, `input`, `textarea`, `select`, `[role=button|link|checkbox|radio|tab|menuitem|option|switch|textbox|combobox]`, `[contenteditable]`, `[onclick]`, `summary`.
     - Hidden elements (`display:none`, `visibility:hidden`, `hidden`, `aria-hidden=true`) are skipped.
     - It traverses open shadow roots and same-origin iframes.
-    - Refs restart from `e1` on each snapshot.
+    - Refs are stable for the page lifetime: an element keeps its ref across snapshots and finds, and a ref is never reused for another element (monotonic counter; the first snapshot of a fresh page starts at `e1`). *(Changed in the final review fix wave, I1.)*
   - `SC.resolve(ref: string) -> Element | null` (a WeakRef map from the last snapshot; null if the element is GC'd or `!el.isConnected`)
   - `SC.find(query: string) -> [{ref, role, name}]` (case-insensitive substring over name and text; takes a fresh snapshot of interactive elements first)
   - `SC.text(ref?: string) -> string` (`innerText` of the element or of `document.body`, collapsed whitespace, max 50000 chars)
