@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Events Fixture</title>
+<style>body{font:16px system-ui;padding:24px} #log{font:12px ui-monospace;white-space:pre;margin-top:16px}</style>
+</head>
+<body>
+<h1>Events Fixture</h1>
+<button id="btn" aria-label="spike-button">Spike Button</button>
+<a id="lnk" href="#clicked" aria-label="spike-link">Spike Link</a>
+<p><input id="inp" aria-label="spike-input" placeholder="type here"></p>
+<p><textarea id="ta" aria-label="spike-textarea"></textarea></p>
+<div id="log"></div>
+<script>
+const out = document.getElementById('log');
+const W = new URLSearchParams(location.search).get('w') || '?';
+document.title = 'Events Fixture ' + W;
+if (new URLSearchParams(location.search).get('mark') === 'btn') document.getElementById('btn').classList.add('__sc_m_live');
+function log(e) {
+  const d = {
+    w: W, type: e.type, target: e.target.id || e.target.nodeName, isTrusted: e.isTrusted,
+    key: e.key ?? null, value: e.target.value ?? null,
+    hidden: document.hidden, hasFocus: document.hasFocus(), t: Date.now()
+  };
+  out.textContent = JSON.stringify(d) + '\n' + out.textContent;
+  fetch('/log', { method: 'POST', body: JSON.stringify(d) });
+}
+['pointerdown','mousedown','mouseup','click','focus','keydown','keyup','beforeinput','input','change']
+  .forEach(t => document.addEventListener(t, log, true));
+fetch('/log', { method: 'POST', body: JSON.stringify({ type: 'loaded', t: Date.now() }) });
+</script>
+</body>
+</html>
