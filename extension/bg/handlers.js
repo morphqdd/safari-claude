@@ -6,17 +6,18 @@
   ];
   const NO_RECEIVER = /Could not establish connection|Receiving end does not exist|no receiver/i;
   const LOAD_TIMEOUT_MS = 30000;
+  const SITES_ONCE = "sc.sitesOnce"; // hosts allowed for the current chat turn (read by content/sites.js)
   const err = (code, message) => ({ code, message });
 
   const CONTENT_METHODS = new Set([
     "page.snapshot", "page.find", "page.text", "page.scroll",
     "el.prepare", "el.release", "el.submitRisk", "el.domClick", "el.focus",
-    "el.domType", "el.domKey", "el.value", "site.allow", "site.check", "overlay.status",
+    "el.domType", "el.domKey", "el.value", "el.describe", "site.allow", "site.check", "overlay.status",
   ]);
 
   // Safe to re-send: they only read page state (page.scroll and everything that acts is excluded).
   const IDEMPOTENT = new Set([
-    "page.snapshot", "page.find", "page.text", "el.prepare", "el.release", "el.value",
+    "page.snapshot", "page.find", "page.text", "el.prepare", "el.release", "el.value", "el.describe",
     "el.submitRisk", "site.check", "overlay.status",
   ]);
 
@@ -224,6 +225,18 @@
         if (!t.active) throw err("background_tab", "\u0412\u043a\u043b\u0430\u0434\u043a\u0430 \u0430\u0433\u0435\u043d\u0442\u0430 \u0432 \u0444\u043e\u043d\u0435: \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u0435\u043d");
         return { dataUrl: await browser.tabs.captureVisibleTab(t.windowId, { format: "png" }) };
       }
+      case "site.allowOnce": {
+        const host = String(params.domain ?? "").toLowerCase();
+        if (!host) throw err("bad_request", "site.allowOnce: domain is required");
+        const got = await browser.storage.local.get(SITES_ONCE);
+        const hosts = Array.isArray(got?.[SITES_ONCE]) ? got[SITES_ONCE] : [];
+        if (!hosts.includes(host)) hosts.push(host);
+        await browser.storage.local.set({ [SITES_ONCE]: hosts });
+        return {};
+      }
+      case "site.clearOnce":
+        await browser.storage.local.set({ [SITES_ONCE]: [] });
+        return {};
       default:
         if (CONTENT_METHODS.has(method)) return toContent(deps, agent(deps), method, params);
         throw err("bad_request", `\u041d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u044b\u0439 \u043c\u0435\u0442\u043e\u0434 ${method}`);
