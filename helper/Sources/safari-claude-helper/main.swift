@@ -6,18 +6,12 @@ func notImplemented(_ name: String) -> Never {
     exit(1)
 }
 
-struct PlaceholderTools: ToolHandling {
-    func call(name: String, arguments: JSON, link: ExtensionLink) async throws -> JSON {
-        throw RPCError.internal("tools not implemented")
-    }
-}
-
 func runDaemon() -> Never {
     var devPort: UInt16?
     let args = Array(CommandLine.arguments.dropFirst(2))
     if let i = args.firstIndex(of: "--dev-port"), i + 1 < args.count { devPort = UInt16(args[i + 1]) }
     do {
-        let daemon = Daemon(auth: Auth(), tools: PlaceholderTools())
+        let daemon = Daemon(auth: Auth(), tools: ToolRunner(actuator: AXActuator()))
         try daemon.serve(devPort: devPort)
         withExtendedLifetime(daemon) { dispatchMain() }
     } catch {
