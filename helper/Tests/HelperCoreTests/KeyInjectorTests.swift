@@ -27,4 +27,15 @@ import Testing
         #expect(KeyInjector.virtualKey(for: "z") == 6)
         #expect(KeyInjector.virtualKey(for: "ArrowLeft") == 123)
     }
+
+    @Test func keyEventMapping() {
+        func ev(_ s: String) -> (CGKeyCode, [UInt16]?) {
+            let e = KeyInjector.keyEvent(for: Array(s.utf16)); return (e.key, e.unicode)
+        }
+        #expect(ev("\n") == (36, nil))
+        #expect(ev("\r\n") == (36, nil))
+        #expect(ev("\t") == (48, nil))
+        #expect(ev("a") == (0, [0x61]))
+        #expect(ev("Я") == (0, [0x042F]))
+    }
 }

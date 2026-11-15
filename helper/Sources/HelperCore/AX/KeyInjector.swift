@@ -62,6 +62,20 @@ public enum KeyInjector {
         return ansi[key.lowercased()]
     }
 
+    /// Key code and optional Unicode string for one grapheme chunk. Newlines and tabs become Enter/Tab keys.
+    static func keyEvent(for chunk: [UInt16]) -> (key: CGKeyCode, unicode: [UInt16]?) {
+        let s = String(decoding: chunk, as: UTF16.self)
+        switch s {
+        case "\n", "\r", "\r\n": return (36, nil)
+        case "\t": return (48, nil)
+        default:
+            if s.unicodeScalars.count == 1, let u = s.unicodeScalars.first, u.isASCII {
+                return (virtualKey(for: s) ?? 0, chunk)
+            }
+            return (0, chunk)
+        }
+    }
+
     static let frontmostMessage = "Safari стал активным — ввод остановлен"
 
     /// Posts one keyDown/keyUp pair to `pid`. `isFrontmost` is re-checked before each event.
@@ -83,11 +97,11 @@ extension AXActuator {
     public func postText(_ text: String) throws {
         guard let pid = SafariLocator.safariPid() else { throw RPCError.notFound("Safari is not running") }
         for chunk in KeyInjector.chunks(text) {
+            let (vk, units) = KeyInjector.keyEvent(for: chunk)
             let s = String(decoding: chunk, as: UTF16.self)
-            let ascii = s.unicodeScalars.count == 1 && s.unicodeScalars.first!.isASCII
-            let vk = ascii ? (KeyInjector.virtualKey(for: s) ?? 0) : 0
-            let upper = ascii && s.rangeOfCharacter(from: .uppercaseLetters) != nil
-            try KeyInjector.post(pid: pid, vk: vk, units: chunk, flags: upper ? .maskShift : [],
+            let upper = units != nil && s.unicodeScalars.count == 1 && s.unicodeScalars.first!.isASCII
+                && s.rangeOfCharacter(from: .uppercaseLetters) != nil
+            try KeyInjector.post(pid: pid, vk: vk, units: units, flags: upper ? .maskShift : [],
                                  isFrontmost: isSafariFrontmost)
             Thread.sleep(forTimeInterval: 0.015)
         }
