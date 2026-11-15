@@ -55,9 +55,11 @@ public enum ToolCatalog {
         tool("wait", "Wait for a duration or for a condition.",
              [("ms", int("Milliseconds to wait.")), ("for", str("Condition to wait for."))]),
         tool("confirm_action", "Ask the user to confirm a risky click, typing, or access to a new site.",
-             [("kind", str("What is being confirmed.", enum: ["click", "type", "site"])),
+             [("kind", str("What is being confirmed.", enum: ["click", "type", "key", "site"])),
               ("ref", str("Element ref (click/type).")), ("text", str("Text to be typed (type).")),
-              ("domain", str("Domain to allow (site)."))], required: ["kind"]),
+              ("domain", str("Domain to allow (site).")),
+              ("combo", str("Key combination (key).")),
+              ("submit", bool("Press Enter after typing (type)."))], required: ["kind"]),
     ]
 
     public static let names: Set<String> = Set(tools.compactMap { $0["name"]?.string })

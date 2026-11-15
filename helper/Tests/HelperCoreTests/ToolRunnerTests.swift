@@ -26,10 +26,12 @@ final class ScriptedExtension: Connection, @unchecked Sendable {
     private var _methods: [String] = []
     var responder: (String, JSON) -> Result<JSON, RPCError> = { _, _ in .success(.object([:])) }
     weak var link: ExtensionLink?
+    var hold: Set<String> = []
     var methods: [String] { lock.lock(); defer { lock.unlock() }; return _methods }
     func send(_ text: String) {
         guard case .req(let id, let method, let params)? = try? JSONDecoder().decode(Message.self, from: Data(text.utf8)) else { return }
         lock.lock(); _methods.append(method); lock.unlock()
+        if hold.contains(method) { return }
         let r = responder(method, params)
         DispatchQueue.global().async {
             switch r {
@@ -48,14 +50,18 @@ private struct Rig {
     let ext = ScriptedExtension()
     let actuator = FakeActuator()
     let runner: ToolRunner
-    init(active: Bool = true, risky: Bool = false, extra: @escaping (String, JSON) -> Result<JSON, RPCError>? = { _, _ in nil }) {
+    init(active: Bool = true, risky: Bool = false, windowFocused: Bool = true, focused: Bool = true,
+         submitRisky: Bool = false, hold: Set<String> = [], extra: @escaping (String, JSON) -> Result<JSON, RPCError>? = { _, _ in nil }) {
         runner = ToolRunner(actuator: actuator, pollInterval: 0.01, findTimeout: 0.1)
         ext.link = link
+        ext.hold = hold
         ext.responder = { method, params in
             if let r = extra(method, params) { return r }
             switch method {
             case "el.prepare": return .success(obj(["marker": .string("m1"), "risk": obj(["risky": .bool(risky)])]))
-            case "tab.state": return .success(obj(["tabId": .number(1), "url": .string("https://a.test/"), "title": .string("A"), "activeInWindow": .bool(active)]))
+            case "tab.state": return .success(obj(["tabId": .number(1), "url": .string("https://a.test/"), "title": .string("A"), "activeInWindow": .bool(active), "windowFocused": .bool(windowFocused)]))
+            case "el.focus": return .success(obj(["focused": .bool(focused)]))
+            case "el.submitRisk": return .success(obj(["risky": .bool(submitRisky)]))
             case "el.value": return .success(obj(["value": .string("abc")]))
             case "el.domType": return .success(obj(["value": .string("abc")]))
             default: return .success(obj([:]))
@@ -124,7 +130,7 @@ private struct Rig {
     @Test func confirmActionClickWithoutRefIsBadRequest() async {
         let rig = Rig()
         do { _ = try await rig.run("confirm_action", ["kind": .string("click")]); Issue.record("expected error") }
-        catch let e as RPCError { #expect(e.code == "bad_request") } catch {}
+        catch let e as RPCError { #expect(e.code == "bad_request") } catch { Issue.record("unexpected error \(error)") }
     }
 
     @Test func confirmSiteAllows() async throws {
@@ -187,7 +193,7 @@ private struct Rig {
     @Test func waitForTimesOut() async {
         let rig = Rig(extra: { m, _ in m == "page.find" ? .success(obj(["matches": .array([])])) : nil })
         do { _ = try await rig.run("wait", ["for": .string("x")]); Issue.record("expected error") }
-        catch let e as RPCError { #expect(e.code == "timeout"); #expect(e.message == "\"x\" not found within 10 s") } catch {}
+        catch let e as RPCError { #expect(e.code == "timeout"); #expect(e.message == "\"x\" not found within 10 s") } catch { Issue.record("unexpected error \(error)") }
     }
 
     @Test func waitMsReportsClamped() async throws {
@@ -199,7 +205,7 @@ private struct Rig {
         let rig = Rig()
         for (name, args) in [("click", [String: JSON]()), ("type", ["ref": .string("e")]), ("navigate", [:]), ("nope", [:])] {
             do { _ = try await rig.run(name, args); Issue.record("expected error for \(name)") }
-            catch let e as RPCError { #expect(e.code == "bad_request") } catch {}
+            catch let e as RPCError { #expect(e.code == "bad_request") } catch { Issue.record("unexpected error \(error)") }
         }
     }
 
@@ -208,15 +214,84 @@ private struct Rig {
         #expect(try await rig.run("click", ["ref": .string("e1")]) == "clicked (trusted)")
     }
 
-    @Test func cancellationStopsDriving() async throws {
-        let rig = Rig()
-        let task = Task { () -> String in
-            try await Task.sleep(nanoseconds: 50_000_000)
-            return try await rig.run("click", ["ref": .string("e1")])
-        }
+    @Test func cancellationStopsDrivingAndReleases() async throws {
+        let rig = Rig(hold: ["tab.state"])
+        let task = Task { try await rig.run("click", ["ref": .string("e1")]) }
+        for _ in 0..<200 where !rig.ext.methods.contains("tab.state") { try await Task.sleep(nanoseconds: 10_000_000) }
         task.cancel()
         do { _ = try await task.value; Issue.record("expected error") }
-        catch let e as RPCError { #expect(e.code == "cancelled") } catch {}
+        catch let e as RPCError { #expect(e.code == "cancelled") } catch { Issue.record("unexpected error \(error)") }
         #expect(rig.actuator.calls.isEmpty)
+        #expect(!rig.ext.methods.contains("el.domClick"))
+        #expect(rig.ext.methods.contains("el.release"))
+    }
+
+    @Test func cancelDuringPrepareReleases() async throws {
+        let rig = Rig(hold: ["el.prepare"])
+        let task = Task { try await rig.run("click", ["ref": .string("e1")]) }
+        for _ in 0..<200 where !rig.ext.methods.contains("el.prepare") { try await Task.sleep(nanoseconds: 10_000_000) }
+        task.cancel()
+        _ = try? await task.value
+        #expect(rig.ext.methods.contains("el.release"))
+    }
+
+    @Test func releaseFailureDoesNotFailClick() async throws {
+        let rig = Rig(extra: { m, _ in m == "el.release" ? .failure(RPCError.internal("gone")) : nil })
+        #expect(try await rig.run("click", ["ref": .string("e1")]) == "clicked (trusted)")
+    }
+
+    @Test func valueFailureAfterTypeIsPageChanged() async throws {
+        let rig = Rig(extra: { m, _ in m == "el.value" ? .failure(RPCError.notFound("gone")) : nil })
+        let t = try await rig.run("type", ["ref": .string("e1"), "text": .string("abc")])
+        #expect(t == "typed (trusted); value: (page changed)")
+    }
+
+    @Test func unfocusedElementFallsBackToDomType() async throws {
+        let rig = Rig(focused: false)
+        let t = try await rig.run("type", ["ref": .string("e1"), "text": .string("abc")])
+        #expect(t.hasPrefix("typed (dom)"))
+        #expect(rig.actuator.calls.isEmpty)
+    }
+
+    @Test func keyUsesDomWhenWindowNotFocused() async throws {
+        let rig = Rig(windowFocused: false)
+        #expect(try await rig.run("key", ["combo": .string("Tab")]) == "pressed Tab (dom)")
+        #expect(rig.actuator.calls.isEmpty)
+    }
+
+    @Test func keyUsesDomWhenSafariFrontmost() async throws {
+        let rig = Rig()
+        rig.actuator.frontmost = true
+        #expect(try await rig.run("key", ["combo": .string("Tab")]) == "pressed Tab (dom)")
+        #expect(rig.ext.methods.contains("el.domKey"))
+    }
+
+    @Test func riskySubmitViaTypeRequiresConfirmation() async {
+        let rig = Rig(submitRisky: true)
+        do { _ = try await rig.run("type", ["ref": .string("e1"), "text": .string("abc"), "submit": .bool(true)]); Issue.record("expected error") }
+        catch let e as RPCError { #expect(e.code == "risky_requires_confirmation") } catch { Issue.record("unexpected error \(error)") }
+        #expect(rig.actuator.calls.isEmpty)
+        #expect(!rig.ext.methods.contains("el.domType"))
+    }
+
+    @Test func confirmTypeSkipsSubmitRisk() async throws {
+        let rig = Rig(risky: true, submitRisky: true)
+        let t = try await rig.run("confirm_action", ["kind": .string("type"), "ref": .string("e1"), "text": .string("abc"), "submit": .bool(true)])
+        #expect(t.hasPrefix("typed (trusted)"))
+        #expect(rig.actuator.calls == ["postText:abc", "postCombo:Enter"])
+    }
+
+    @Test func riskyEnterViaKeyRequiresConfirmation() async {
+        let rig = Rig(submitRisky: true)
+        do { _ = try await rig.run("key", ["combo": .string("Enter")]); Issue.record("expected error") }
+        catch let e as RPCError { #expect(e.code == "risky_requires_confirmation") } catch { Issue.record("unexpected error \(error)") }
+        #expect(rig.actuator.calls.isEmpty)
+        #expect(!rig.ext.methods.contains("el.domKey"))
+    }
+
+    @Test func confirmKeyPresses() async throws {
+        let rig = Rig(submitRisky: true)
+        #expect(try await rig.run("confirm_action", ["kind": .string("key"), "combo": .string("Enter")]) == "pressed Enter (trusted)")
+        #expect(rig.actuator.calls == ["postCombo:Enter"])
     }
 }

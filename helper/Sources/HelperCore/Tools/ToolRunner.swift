@@ -31,8 +31,8 @@ public final class ToolRunner: ToolHandling {
         case "find": return try await run.find()
         case "get_text": return try await run.getText()
         case "click": return try await run.click(checkRisk: true)
-        case "type": return try await run.type(checkRisk: true)
-        case "key": return try await run.key()
+        case "type": return try await run.type(confirmed: false)
+        case "key": return try await run.key(confirmed: false)
         case "scroll": return try await run.scroll()
         case "screenshot": return try await run.screenshot()
         case "wait": return try await run.wait()
@@ -207,7 +207,10 @@ private struct Run {
             return try await click(checkRisk: false)
         case "type":
             _ = try req("ref"); _ = try req("text")
-            return try await type(checkRisk: false)
+            return try await type(confirmed: true)
+        case "key":
+            _ = try req("combo")
+            return try await key(confirmed: true)
         default:
             throw RPCError.badRequest("confirm_action: unknown kind")
         }
@@ -215,23 +218,42 @@ private struct Run {
 
     // MARK: element actions
 
-    /// Runs `body` between el.prepare and el.release; release is sent even when body throws.
+    /// Best-effort el.release, sent from a context that Stop (task cancellation) cannot cancel.
+    func release(_ ref: String) async {
+        let link = self.link
+        await Task.detached {
+            _ = try? await link.request("el.release", .object(["ref": .string(ref)]))
+        }.value
+    }
+
+    /// Runs `body` between el.prepare and el.release. Release is always sent (also on error or Stop)
+    /// and its failure never fails the action.
     func withElement<T>(_ ref: String, action: String, checkRisk: Bool,
                         _ body: (JSON) async throws -> T) async throws -> T {
-        let prep = try await ext("el.prepare", ["ref": .string(ref), "action": .string(action)])
         let result: T
         do {
+            let prep = try await ext("el.prepare", ["ref": .string(ref), "action": .string(action)])
             if checkRisk, prep["risk"]?["risky"]?.bool == true {
                 let kind = prep["risk"]?["kind"]?.string.map { " (\($0))" } ?? ""
                 throw RPCError.riskyRequiresConfirmation("risky action\(kind): use confirm_action kind=\(action)")
             }
             result = try await body(prep)
         } catch {
-            _ = try? await link.request("el.release", .object(["ref": .string(ref)]))
+            await release(ref)
             throw error
         }
-        _ = try await ext("el.release", ["ref": .string(ref)])
+        await release(ref)
         return result
+    }
+
+    /// Throws risky_requires_confirmation when pressing Enter would submit a risky form.
+    func checkSubmitRisk(ref: String?, kind: String) async throws {
+        var p: [String: JSON] = [:]
+        if let ref { p["ref"] = .string(ref) }
+        let r = try await ext("el.submitRisk", p)
+        if r["risky"]?.bool == true {
+            throw RPCError.riskyRequiresConfirmation("submitting this form needs confirmation: use confirm_action kind=\(kind)")
+        }
     }
 
     func click(checkRisk: Bool) async throws -> JSON {
@@ -240,6 +262,7 @@ private struct Run {
         let trusted = try await withElement(ref, action: "click", checkRisk: checkRisk) { prep -> Bool in
             let state = try await ext("tab.state")
             if state["activeInWindow"]?.bool == true, let marker = prep["marker"]?.string {
+                try checkCancelled()
                 do {
                     try actuator.press(marker: marker, pageURL: resultText(state, "url"))
                     return true
@@ -251,47 +274,54 @@ private struct Run {
         return Self.text("clicked (\(trusted ? "trusted" : "dom"))")
     }
 
-    /// Trusted keyboard input only when the tab is active in its window but Safari is not frontmost.
+    /// Trusted keyboard input only when the tab is active in a focused window but Safari is not frontmost.
     func useKeys() async throws -> Bool {
         let state = try await ext("tab.state")
-        return state["activeInWindow"]?.bool == true && !actuator.isSafariFrontmost()
+        return state["activeInWindow"]?.bool == true && state["windowFocused"]?.bool == true
+            && !actuator.isSafariFrontmost()
     }
 
-    func type(checkRisk: Bool) async throws -> JSON {
+    func type(confirmed: Bool) async throws -> JSON {
         let ref = try req("ref")
         guard let text = args["text"]?.string else { throw RPCError.badRequest("type: missing text") }
         let submit = args["submit"]?.bool == true
         let enter = try KeyCombo.parse("Enter")
+        if submit && !confirmed { try await checkSubmitRisk(ref: ref, kind: "type") }
         try await status("Ввожу текст в \(ref)")
         var trusted = false
-        try await withElement(ref, action: "type", checkRisk: checkRisk) { _ -> Void in
-            _ = try await ext("el.focus", ["ref": .string(ref)])
-            trusted = try await useKeys()
+        try await withElement(ref, action: "type", checkRisk: !confirmed) { _ -> Void in
+            let focus = try await ext("el.focus", ["ref": .string(ref)])
+            trusted = try await useKeys() && focus["focused"]?.bool == true
             if trusted {
+                try checkCancelled()
                 try actuator.postText(text)
             } else {
                 _ = try await ext("el.domType", ["ref": .string(ref), "text": .string(text)])
             }
             if submit {
-                if trusted { try actuator.postCombo(enter) }
-                else { _ = try await ext("el.domKey", ["combo": .string("Enter")]) }
+                if trusted {
+                    try checkCancelled()
+                    try actuator.postCombo(enter)
+                } else { _ = try await ext("el.domKey", ["combo": .string("Enter")]) }
             }
         }
-        let value = try await finalValue(ref)
-        return Self.text("typed (\(trusted ? "trusted" : "dom")); value: \"\(value)\"")
+        // The page may be gone after a submit; the action already happened, so this is best-effort.
+        let value = (try? await link.request("el.value", .object(["ref": .string(ref)])))
+            .flatMap { $0["value"]?.string }
+        let shown = value.map { "\"\($0)\"" } ?? "(page changed)"
+        return Self.text("typed (\(trusted ? "trusted" : "dom")); value: \(shown)")
     }
 
-    func finalValue(_ ref: String) async throws -> String {
-        resultText(try await ext("el.value", ["ref": .string(ref)]), "value")
-    }
-
-    func key() async throws -> JSON {
+    func key(confirmed: Bool) async throws -> JSON {
         let combo = try req("combo")
         let parsed = try KeyCombo.parse(combo)
+        if parsed.key == "Enter" && !confirmed { try await checkSubmitRisk(ref: nil, kind: "key") }
         try await status("Нажимаю \(combo)")
         let trusted = try await useKeys()
-        if trusted { try actuator.postCombo(parsed) }
-        else { _ = try await ext("el.domKey", ["combo": .string(combo)]) }
+        if trusted {
+            try checkCancelled()
+            try actuator.postCombo(parsed)
+        } else { _ = try await ext("el.domKey", ["combo": .string(combo)]) }
         return Self.text("pressed \(combo) (\(trusted ? "trusted" : "dom"))")
     }
 }
