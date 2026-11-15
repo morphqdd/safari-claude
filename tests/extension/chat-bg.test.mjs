@@ -29,7 +29,11 @@ function setup({ lastFocused = { id: 1, left: 100, top: 50, width: 1000, height:
     runtime: { getURL: (p) => BASE + p, onMessage: on("message"), onConnect: on("connect") },
     browserAction: { onClicked: on("toolbar") },
     commands: { onCommand: on("command") },
-    contextMenus: { create: (o) => { calls.menus.push(o); }, onClicked: on("menu") },
+    contextMenus: {
+      create: (o, cb) => { if (calls.menus.some((m) => m.id === o.id)) throw new Error("duplicate id"); calls.menus.push(o); cb?.(); },
+      removeAll: async () => { calls.menus.length = 0; calls.removeAll = (calls.removeAll ?? 0) + 1; },
+      onClicked: on("menu"),
+    },
     windows: {
       getLastFocused: async () => lastFocused,
       create: async (o) => { calls.create.push(j(o)); return { id: nextWin++ }; },
@@ -111,6 +115,8 @@ test("secondOpenFocusesExistingWindow", async () => {
 
 test("askPageSendsEventAndOpens", async () => {
   const t = setup();
+  await ticks();
+  assert.equal(t.calls.removeAll, 1);
   assert.deepEqual(j(t.calls.menus), [{ id: "ask-page", title: "Ask Claude about this page", contexts: ["page"] }]);
   t.L.menu({ menuItemId: "ask-page" }, { id: 12 });
   await ticks();
@@ -282,6 +288,29 @@ test("turnEndAndStopRefusePendingCards", async () => {
   assert.deepEqual(t.events.at(-1), ["stop", {}]);
   // A late reply to a closed card is ignored.
   p.msg({ type: "confirmReply", id: id2, decision: "allow" });
+});
+
+test("backgroundStartClearsSitesOnce", async () => {
+  const storage = fakeStorage();
+  storage.store["sc.sitesOnce"] = ["left.example"];
+  setup({ storage });
+  await ticks();
+  assert.deepEqual(storage.store["sc.sitesOnce"], []);
+});
+
+test("turnEndClearsSitesOnce", async () => {
+  const storage = fakeStorage();
+  const t = setup({ storage });
+  await ticks();
+  const deps = { browser: t.browser, state: {}, sendToTab: async () => ({}) };
+  await t.ctx.SCHandlers.handle("site.allowOnce", { domain: "a.example" }, deps);
+  assert.deepEqual(storage.store["sc.sitesOnce"], ["a.example"]);
+  t.SCLink.onEvent("chat.delta", { text: "x" });
+  await ticks();
+  assert.deepEqual(storage.store["sc.sitesOnce"], ["a.example"]);
+  t.SCLink.onEvent("chat.turnEnd", {});
+  await ticks();
+  assert.deepEqual(storage.store["sc.sitesOnce"], []);
 });
 
 test("siteOnceAllowedUntilCleared", async () => {

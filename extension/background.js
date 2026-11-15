@@ -7,6 +7,8 @@ const deps = { browser, sendToTab, sendEvent, state };
 const openChat = () => { SCChat.openChat(deps).catch(() => {}); };
 
 SCHandlers.watch(browser, state);
+// No turn survives a background restart, so neither do its "once" sites.
+SCChat.clearSitesOnce(deps);
 SCLink.onRequest = (method, params) =>
   method === "chat.confirm" ? SCChat.confirm(params, deps) : SCHandlers.handle(method, params, deps);
 SCLink.onEvent = (name, data) => {
@@ -27,7 +29,15 @@ browser.browserAction?.onClicked?.addListener(openChat);
 browser.commands?.onCommand?.addListener((name) => { if (name === "open-chat") openChat(); });
 if (browser.contextMenus) {
   // ASCII only: Safari garbles non-ASCII menu titles.
-  browser.contextMenus.create({ id: "ask-page", title: "Ask Claude about this page", contexts: ["page"] });
+  // removeAll first: a background reload would otherwise hit a duplicate-id error.
+  Promise.resolve()
+    .then(() => browser.contextMenus.removeAll?.())
+    .catch(() => {})
+    .then(() => browser.contextMenus.create(
+      { id: "ask-page", title: "Ask Claude about this page", contexts: ["page"] },
+      () => void browser.runtime.lastError,
+    ))
+    .catch(() => {});
   browser.contextMenus.onClicked.addListener((info, tab) => {
     if (info.menuItemId !== "ask-page") return;
     if (tab?.id != null) sendEvent("chat.askPage", { tabId: tab.id });

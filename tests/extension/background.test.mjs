@@ -37,7 +37,7 @@ function loadBackground(connected) {
       runtime: { onMessage: { addListener: (f) => (listener = f) } },
     },
     SCHandlers: { watch() {}, handle() {} },
-    SCChat: {},
+    SCChat: { clearSitesOnce() {} },
     SCLink: {
       connect() {},
       sendEvent(n, d) { if (!connected) return false; sent.push([n, d]); return true; },

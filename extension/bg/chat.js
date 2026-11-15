@@ -88,12 +88,21 @@
   }
 
   // Daemon `chat.*` events -> every chat port as {type: <name without "chat.">, ...data}.
-  function onDaemonEvent(name, data, _deps) {
+  function onDaemonEvent(name, data, deps) {
     if (!String(name).startsWith("chat.")) return false;
     const type = name.slice("chat.".length);
-    if (type === "turnEnd") refuseAll(true);
+    if (type === "turnEnd") {
+      refuseAll(true);
+      // The daemon also sends site.clearOnce; this covers a lost link or a crashed daemon.
+      clearSitesOnce(deps);
+    }
     post({ ...(data ?? {}), type });
     return true;
+  }
+
+  // Sites allowed "once" must not outlive the turn (storage.local survives restarts).
+  function clearSitesOnce(deps) {
+    return SCHandlers.handle("site.clearOnce", {}, deps).catch(() => {});
   }
 
   // Card text comes from the agent tab (host, element role and name), never from the model;
@@ -121,5 +130,5 @@
     });
   }
 
-  globalThis.SCChat = { openChat, onPort, onDaemonEvent, confirm, onWindowRemoved };
+  globalThis.SCChat = { openChat, onPort, onDaemonEvent, confirm, onWindowRemoved, clearSitesOnce };
 })();
