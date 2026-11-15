@@ -33,6 +33,8 @@ if [ "$install" = 1 ]; then
   mkdir -p "$HOME/Applications"
   rm -rf "$HOME/Applications/Safari Agent.app"
   cp -R "$APP" "$HOME/Applications/Safari Agent.app"
+  # Otherwise Safari lists the build copy as a second "Safari Agent".
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP" 2>/dev/null || true
   echo "Установлено: ~/Applications/Safari Agent.app (откройте его один раз)"
 else
   echo "Собрано: $APP"
