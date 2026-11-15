@@ -6,7 +6,25 @@ func notImplemented(_ name: String) -> Never {
     exit(1)
 }
 
-func runDaemon() -> Never { notImplemented("daemon") }
+struct PlaceholderTools: ToolHandling {
+    func call(name: String, arguments: JSON, link: ExtensionLink) async throws -> JSON {
+        throw RPCError.internal("tools not implemented")
+    }
+}
+
+func runDaemon() -> Never {
+    var devPort: UInt16?
+    let args = Array(CommandLine.arguments.dropFirst(2))
+    if let i = args.firstIndex(of: "--dev-port"), i + 1 < args.count { devPort = UInt16(args[i + 1]) }
+    do {
+        let daemon = Daemon(auth: Auth(), tools: PlaceholderTools())
+        try daemon.serve(devPort: devPort)
+        withExtendedLifetime(daemon) { dispatchMain() }
+    } catch {
+        FileHandle.standardError.write(Data("daemon: \(error)\n".utf8))
+        exit(1)
+    }
+}
 func runMCP() -> Never { notImplemented("mcp") }
 func runInstall() -> Never { notImplemented("install") }
 func runUninstall() -> Never { notImplemented("uninstall") }

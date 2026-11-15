@@ -5,7 +5,7 @@ public enum Role: String, Codable, Equatable {
     case mcp
 }
 
-public indirect enum JSON: Codable, Equatable {
+public indirect enum JSON: Codable, Equatable, Sendable {
     case null
     case bool(Bool)
     case number(Double)
@@ -49,7 +49,7 @@ public indirect enum JSON: Codable, Equatable {
     }
 }
 
-public struct RPCError: Codable, Equatable, Error {
+public struct RPCError: Codable, Equatable, Error, Sendable {
     public var code: String
     public var message: String
 
