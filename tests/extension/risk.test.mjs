@@ -60,3 +60,17 @@ test("deniedSite", async () => {
   await w.SC.sites.allow("online.sberbank.ru");
   assert.equal(await w.SC.sites.isAllowed("online.sberbank.ru"), "allowed");
 });
+
+test("riskCheckoutRu", () => assert.deepEqual(risk("<button>Оформить заказ</button>"), { risky: true, kind: "payment" }));
+test("riskZakazRu", () => assert.deepEqual(risk("<button>Заказ</button>"), { risky: true, kind: "payment" }));
+test("riskEnglishWordBoundaries", () => {
+  for (const t of ["Border settings", "Postal code", "Deposit info", "Display", "Repost settings", "Composer"]) {
+    assert.equal(risk(`<button>${t}</button>`).risky, false, t);
+  }
+  for (const [t, kind] of [["Pay now", "payment"], ["Payment", "payment"], ["Place order", "payment"], ["Checkout", "payment"],
+    ["Buy", "payment"], ["Post", "send"], ["Send message", "send"], ["Publish", "send"], ["Delete", "delete"]]) {
+    assert.deepEqual(risk(`<button>${t}</button>`), { risky: true, kind }, t);
+  }
+});
+// Decision: "Remove filter" stays risky (delete-like wording); a false positive costs one confirmation.
+test("riskRemoveFilterStaysRisky", () => assert.deepEqual(risk("<button>Remove filter</button>"), { risky: true, kind: "delete" }));

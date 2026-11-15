@@ -10,12 +10,18 @@
   };
   const win = (el) => el.ownerDocument.defaultView;
 
-  SC.prepare = async (ref, _action) => {
-    const el = need(ref);
+  // Site allow/deny gate for the agent tab's hostname.
+  SC.checkSite = async () => {
     const host = location.hostname;
     if ((await SC.sites.isAllowed(host)) !== "allowed") {
       throw err("site_not_allowed", `Разрешите сайт: confirm_action kind=site domain=${host}`);
     }
+    return {};
+  };
+
+  SC.prepare = async (ref, _action) => {
+    const el = need(ref);
+    await SC.checkSite();
     const marker = `__sc_m_${ref}`;
     clearMarker(marker);
     try {
@@ -46,9 +52,19 @@
     SC.overlay?.pulse();
   };
 
+  const isButtonLike = (el) => {
+    const tag = el.tagName;
+    const type = (el.getAttribute?.("type") || "").toLowerCase();
+    return tag === "BUTTON" || tag === "SUMMARY" || (tag === "A" && el.hasAttribute("href")) ||
+      (tag === "INPUT" && ["submit", "button", "reset", "image"].includes(type)) ||
+      el.getAttribute?.("role") === "button";
+  };
+
   SC.submitRisk = (ref) => {
     const el = ref ? need(ref) : document.activeElement;
-    if (!el) return { risky: false };
+    if (!el || el === el.ownerDocument.body || el === el.ownerDocument.documentElement) return { risky: false };
+    // Enter/Space on a focused button activates that button, not the form's default submitter.
+    if (isButtonLike(el)) return SC.classifyRisk(el);
     const form = el.closest?.("form") ?? el.form ?? null;
     if (!form) return SC.classifyRisk(el);
     const submitter = form.querySelector("[type=submit], button:not([type])");

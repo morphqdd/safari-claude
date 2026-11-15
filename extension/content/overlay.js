@@ -83,6 +83,12 @@
     st = { host, hl, cur, label, stop, x: null, y: null, origTitle: document.title, timers: new Set(), pending: new Set(), stopped: false };
   }
 
+  // Mounts on first use; re-attaches the host if the page removed it.
+  function ensureMounted() {
+    if (!st) mount();
+    else if (!st.host.isConnected) document.documentElement.appendChild(st.host);
+  }
+
   function later(fn, ms) {
     const id = setTimeout(() => { st?.timers.delete(id); fn(); }, ms);
     st?.timers.add(id);
@@ -100,13 +106,13 @@
       st = null;
       return;
     }
-    if (!st) mount();
+    ensureMounted();
     if (!st.stopped) st.label.textContent = "Claude: " + text;
     if (!document.title.startsWith("● ")) document.title = "● " + document.title;
   }
 
   function doMove(r) {
-    if (!st) mount();
+    ensureMounted();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
     const first = st.x === null;
     const { cur, hl } = st;

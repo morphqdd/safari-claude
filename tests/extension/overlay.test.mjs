@@ -141,3 +141,16 @@ test("subframeIsNoop", async () => {
   assert.equal(host(w), null);
   assert.equal(fw.document.getElementById("__sc_overlay"), null);
 });
+
+test("overlayReattachedWhenPageRemovesIt", async () => {
+  const { w } = load();
+  w.SC.overlay.status("x");
+  host(w).remove();
+  assert.equal(host(w), null);
+  w.SC.overlay.status("y");
+  assert.ok(host(w));
+  host(w).remove();
+  await w.SC.overlay.moveTo(w.document.querySelector("button"));
+  assert.ok(host(w));
+  assert.equal(w.document.querySelectorAll("#__sc_overlay").length, 1);
+});

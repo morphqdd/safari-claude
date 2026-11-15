@@ -11,7 +11,25 @@
   const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"]);
   const BUTTON_INPUTS = new Set(["submit", "button", "reset"]);
 
-  let refs = new Map();
+  // Refs are stable for the page lifetime: an element keeps its ref across snapshots and finds,
+  // and a ref is never reused for another element (monotonic counter).
+  const refs = new Map(); // ref -> WeakRef<Element>
+  const refOf = new WeakMap(); // Element -> ref
+  let counter = 0;
+
+  function refFor(el) {
+    let ref = refOf.get(el);
+    if (!ref) {
+      ref = `e${++counter}`;
+      refOf.set(el, ref);
+      refs.set(ref, new WeakRef(el));
+    }
+    return ref;
+  }
+
+  function pruneRefs() {
+    for (const [ref, w] of refs) if (!w.deref()) refs.delete(ref);
+  }
 
   const collapse = (s) => (s ?? "").replace(/\s+/g, " ").trim();
   const esc = (s) => s.replace(/"/g, '\\"');
@@ -86,8 +104,7 @@
 
   function collect(filter) {
     const out = [];
-    const newRefs = new Map();
-    let n = 0;
+    pruneRefs();
 
     const children = (node, depth, inside) => {
       for (const c of node.childNodes) visit(c, depth, inside);
@@ -105,10 +122,9 @@
 
       let d = depth, inc = inside;
       if (node.matches(INTERACTIVE)) {
-        const ref = `e${++n}`;
+        const ref = refFor(node);
         const role = roleOf(node);
         const name = nameOf(node);
-        newRefs.set(ref, new WeakRef(node));
         out.push({
           line: describe(node, role, name).replace("[ref=]", `[ref=${ref}]`),
           depth, ref, role, name, el: node,
@@ -126,7 +142,6 @@
     }
 
     visit(document.documentElement, 0, false);
-    refs = newRefs;
     return out;
   }
 

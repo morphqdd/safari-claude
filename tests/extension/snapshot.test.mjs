@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { loadContent } from "./helpers.mjs";
+const j = (x) => JSON.parse(JSON.stringify(x));
 
 const BASIC = `<button>Найти</button><a href="/x">Ссылка</a><input aria-label="Поиск">`;
 
@@ -114,4 +115,35 @@ test("resolveNullAfterIframeRemoved", () => {
   const w = shadowAndFrame();
   w.document.getElementById("f").remove();
   assert.equal(w.SC.resolve("e2"), null);
+});
+
+test("refsStableAcrossSnapshotsAndFind", () => {
+  const w = loadContent(`<button id="a">A</button><button id="b">B</button>`);
+  assert.match(w.SC.snapshot("interactive"), /^\[ref=e1\] button "A"\n\[ref=e2\] button "B"$/);
+  const a = w.document.getElementById("a");
+  // a new node inserted before the old ones must not take over their refs
+  w.document.body.insertAdjacentHTML("afterbegin", `<button id="n">A new</button>`);
+  const m = j(w.SC.find("a"));
+  assert.deepEqual(m, [{ ref: "e3", role: "button", name: "A new" }, { ref: "e1", role: "button", name: "A" }]);
+  assert.equal(w.SC.resolve("e1"), a);
+  assert.equal(w.SC.resolve("e3"), w.document.getElementById("n"));
+  assert.equal(w.SC.snapshot("interactive"), ['[ref=e3] button "A new"', '[ref=e1] button "A"', '[ref=e2] button "B"'].join("\n"));
+});
+
+test("removedElementRefNeverReused", () => {
+  const w = loadContent(`<button>A</button>`);
+  w.SC.snapshot("interactive");
+  w.document.querySelector("button").remove();
+  w.document.body.insertAdjacentHTML("afterbegin", `<button>B</button>`);
+  assert.equal(w.SC.snapshot("interactive"), '[ref=e2] button "B"');
+  assert.equal(w.SC.resolve("e1"), null);
+});
+
+test("waitForPollingDoesNotRenumber", () => {
+  const w = loadContent(`<button>Go</button>`);
+  w.SC.snapshot("interactive");
+  for (let i = 0; i < 3; i++) w.SC.find("nothing");
+  w.document.body.insertAdjacentHTML("afterbegin", `<a href="/x">Go too</a>`);
+  w.SC.find("go");
+  assert.equal(w.SC.resolve("e1"), w.document.querySelector("button"));
 });

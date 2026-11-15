@@ -128,7 +128,7 @@ test("releaseAfterNewSnapshotRemovesMarker", async () => {
   w.SC.snapshot("interactive");
   await w.SC.prepare("e1", "click");
   w.document.body.insertAdjacentHTML("afterbegin", "<a href='/x'>L</a>");
-  w.SC.snapshot("interactive"); // e1 now another element
+  w.SC.snapshot("interactive"); // refs are stable: the new link gets e2, e1 stays the button
   w.SC.release("e1");
   assert.equal(w.document.querySelectorAll(".__sc_m_e1").length, 0);
 });
@@ -146,10 +146,29 @@ test("repeatedPrepareLeavesOneMarker", async () => {
   const w = await load("<button>A</button><a href='/x'>L</a>");
   w.SC.snapshot("interactive");
   await w.SC.prepare("e1", "click");
-  w.document.body.insertAdjacentHTML("afterbegin", "<i></i>");
-  w.document.body.removeChild(w.document.querySelector("i"));
-  w.document.querySelector("button").remove();
-  w.SC.snapshot("interactive"); // e1 is now the link
+  // a stray marker (e.g. copied by the page onto another node) is cleared by the next prepare
+  w.document.querySelector("a").classList.add("__sc_m_e1");
   await w.SC.prepare("e1", "click");
   assert.equal(w.document.querySelectorAll(".__sc_m_e1").length, 1);
+  assert.ok(w.document.querySelector("button").classList.contains("__sc_m_e1"));
+});
+
+test("checkSiteGate", async () => {
+  const denied = await load("<button>Go</button>", { allow: false });
+  await assert.rejects(denied.SC.checkSite(), (e) => e.code === "site_not_allowed" && /domain=example.com/.test(e.message));
+  const ok = await load("<button>Go</button>");
+  assert.deepEqual(JSON.parse(JSON.stringify(await ok.SC.checkSite())), {});
+});
+
+test("submitRiskBodyOrHtmlIsSafe", async () => {
+  const w = await load(`<form><input type="password"><button>Pay</button></form>`);
+  assert.equal(w.document.activeElement, w.document.body);
+  assert.deepEqual(JSON.parse(JSON.stringify(w.SC.submitRisk())), { risky: false });
+});
+
+test("submitRiskFocusedButtonClassifiesItself", async () => {
+  // Space/Enter on a focused button activates that button, not the form's default submitter.
+  const w = await load(`<form><input name="q"><button type="submit">Найти</button><button type="button" id="d">Удалить</button></form>`);
+  w.document.getElementById("d").focus();
+  assert.deepEqual(JSON.parse(JSON.stringify(w.SC.submitRisk())), { risky: true, kind: "delete" });
 });

@@ -2,9 +2,10 @@
   const SC = (globalThis.SC ??= {});
   if (SC.classifyRisk) return;
 
-  const PAYMENT = /оплат|купить|заказать|pay|buy|purchase|checkout|order/i;
-  const SEND = /отправить|send|опубликовать|publish|post/i;
-  const DELETE = /удалить|delete|remove|стереть/i;
+  // English terms need a word start (so "border" is not "order"); "post" also a word end ("postal").
+  const PAYMENT = /оплат|купить|заказ|оформить|\b(?:pay|buy|purchase|check ?out|order)/i;
+  const SEND = /отправить|опубликовать|\b(?:send|publish)|\bpost(?:s|ed|ing)?\b/i;
+  const DELETE = /удалить|стереть|\b(?:delete|remove)/i;
   const CARD_NAME = /card|cvv|cvc|iban/i;
 
   const textsOf = (el) =>
