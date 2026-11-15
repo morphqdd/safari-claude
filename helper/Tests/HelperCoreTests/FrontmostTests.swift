@@ -14,7 +14,7 @@ import Testing
             }
         }
         let pid = Frontmost.frontmostPID()
-        #expect(pid != nil)
+        // A headless CI runner has no on-screen windows; then both must be nil.
         #expect(pid == expected)
         if let pid { #expect(Frontmost.isFrontmost(pid: pid)) }
     }
