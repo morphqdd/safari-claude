@@ -3,21 +3,24 @@ import Security
 
 public final class Auth {
     private let paths: Paths.Type
+    private let tokenFile: URL?
 
-    public init(paths: Paths.Type = Paths.self) {
+    /// `tokenFile` overrides the token location (lets tests avoid mutating the global `Paths.root`).
+    public init(paths: Paths.Type = Paths.self, tokenFile: URL? = nil) {
         self.paths = paths
+        self.tokenFile = tokenFile
     }
 
     /// Returns the persisted token, creating it (32 random bytes, hex, mode 0600) if absent.
     public func loadOrCreateToken() throws -> String {
         let fm = FileManager.default
-        let file = paths.token
+        let file = tokenFile ?? paths.token
         if let data = try? Data(contentsOf: file),
            let s = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
            s.count == 64 {
             return s
         }
-        try fm.createDirectory(at: paths.support, withIntermediateDirectories: true)
+        try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         var bytes = [UInt8](repeating: 0, count: 32)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
             throw RPCError.`internal`("random generation failed")
