@@ -56,6 +56,13 @@ private func call(_ id: Int, _ name: String = "t", args: JSON = .object([:])) ->
     .req(id: id, method: "tool.call", params: .object(["name": .string(name), "arguments": args]))
 }
 
+private let stopMessage = "Пользователь нажал «Стоп». Не повторяй действие — спроси пользователя, что делать дальше."
+
+private func errorMessage(_ c: FakeConnection, id: Int) -> String? {
+    for m in c.sent { if case .res(let i, _, let e) = m, i == id { return e?.message } }
+    return nil
+}
+
 private func errorCode(_ c: FakeConnection, id: Int) -> String? {
     for m in c.sent { if case .res(let i, _, let e) = m, i == id { return e?.code } }
     return nil
@@ -115,23 +122,78 @@ private func errorCode(_ c: FakeConnection, id: Int) -> String? {
         #expect(await eventually { errorCode(b, id: 2) == "busy" })
     }
 
-    @Test func stopCancelsInFlight() async {
+    @Test func stopCancelsInFlightAndStaysCancelledUntilLockIdle() async {
         let (auth, token) = tempAuth()
         let gate = Gate()
-        let d = Daemon(auth: auth, tools: FakeTools(handler: { name, args, _ in if name == "slow" { await gate.wait() }; return args }), exit: {})
+        let d = Daemon(auth: auth, tools: FakeTools(handler: { name, args, _ in if name == "slow" { await gate.wait() }; return args }),
+                       lockIdle: 0.5, exit: {})
         let e = await ext(d)
-        let a = await mcp(d, token)
+        let a = await mcp(d, token), b = await mcp(d, token)
         a.receive(call(1, "slow"))
         try? await Task.sleep(nanoseconds: 100_000_000)
         e.receive(.event(name: "stop", data: .object([:])))
         #expect(await eventually { errorCode(a, id: 1) == "cancelled" })
         await gate.open()
-        // next call is cancelled once, lock released, extension told idle
+        // every later call from the owner is cancelled; other sessions stay busy
+        for id in 2...4 {
+            a.receive(call(id))
+            #expect(await eventually { errorCode(a, id: id) == "cancelled" })
+            #expect(errorMessage(a, id: id) == stopMessage)
+        }
+        b.receive(call(5))
+        #expect(await eventually { errorCode(b, id: 5) == "busy" })
+        #expect(!e.sent.contains(.event(name: "idle", data: .object([:]))))
+        // lockIdle expiry releases the lock
+        #expect(await eventually { e.sent.contains(.event(name: "idle", data: .object([:]))) })
+        a.receive(call(6))
+        #expect(await eventually { a.sent.contains(.res(id: 6, result: .object([:]), error: nil)) })
+    }
+
+    @Test func stopWithNothingInFlightCancelsNextCalls() async {
+        let (auth, token) = tempAuth()
+        let d = Daemon(auth: auth, tools: FakeTools(), exit: {})
+        let e = await ext(d)
+        let a = await mcp(d, token)
+        a.receive(call(1))
+        #expect(await eventually { a.sent.contains(.res(id: 1, result: .object([:]), error: nil)) })
+        e.receive(.event(name: "stop", data: .object([:])))
+        try? await Task.sleep(nanoseconds: 50_000_000)
         a.receive(call(2))
         #expect(await eventually { errorCode(a, id: 2) == "cancelled" })
-        #expect(await eventually { e.sent.contains(.event(name: "idle", data: .object([:]))) })
         a.receive(call(3))
-        #expect(await eventually { a.sent.contains(.res(id: 3, result: .object([:]), error: nil)) })
+        #expect(await eventually { errorCode(a, id: 3) == "cancelled" })
+    }
+
+    @Test func stopStateClearedOnOwnerDisconnect() async {
+        let (auth, token) = tempAuth()
+        let d = Daemon(auth: auth, tools: FakeTools(), exit: {})
+        let e = await ext(d)
+        let a = await mcp(d, token), b = await mcp(d, token)
+        a.receive(call(1))
+        _ = await eventually { a.sent.count > 1 }
+        e.receive(.event(name: "stop", data: .object([:])))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        a.disconnect()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        b.receive(call(2))
+        #expect(await eventually { b.sent.contains(.res(id: 2, result: .object([:]), error: nil)) })
+    }
+
+    @Test func stopFromReplacedExtensionIgnored() async {
+        let (auth, token) = tempAuth()
+        let gate = Gate()
+        let d = Daemon(auth: auth, tools: FakeTools(handler: { name, args, _ in if name == "slow" { await gate.wait() }; return args }), exit: {})
+        let old = await ext(d)
+        let cur = await ext(d)
+        let a = await mcp(d, token)
+        a.receive(call(1, "slow"))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        old.receive(.event(name: "stop", data: .object([:])))
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        #expect(errorCode(a, id: 1) == nil)
+        cur.receive(.event(name: "stop", data: .object([:])))
+        #expect(await eventually { errorCode(a, id: 1) == "cancelled" })
+        await gate.open()
     }
 
     @Test func extensionRequestFailsFastWhenAbsent() async {

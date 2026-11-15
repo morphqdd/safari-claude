@@ -25,7 +25,10 @@ public final class Daemon {
     private var clients: [ObjectIdentifier: Client] = [:]
     private var ext: Client?
     private var owner: Client?
-    private var stopPending = false
+    /// Set by Stop; every tool.call from the owner is cancelled until the lock is released
+    /// (lockIdle expiry or owner disconnect).
+    private var stopped = false
+    static let stopMessage = "Пользователь нажал «Стоп». Не повторяй действие — спроси пользователя, что делать дальше."
     private var inflight: [ObjectIdentifier: Call] = [:]
 
     public init(auth: Auth, tools: ToolHandling, idleExit: TimeInterval = 600, lockIdle: TimeInterval = 120,
@@ -91,7 +94,8 @@ public final class Daemon {
         case (.extension_, .res(let id, let result, let error)):
             link.handleResponse(id: id, result: result, error: error)
         case (.extension_, .event(let name, _)):
-            if name == "stop" { handleStop() }
+            // Only the current extension connection may stop; a replaced one is ignored.
+            if name == "stop", client === ext { handleStop() }
         case (.extension_, .req(let id, _, _)):
             send(client.conn, .res(id: id, result: nil, error: .badRequest("extension cannot send requests")))
         case (.mcp, .req(let id, let method, let params)):
@@ -136,9 +140,9 @@ public final class Daemon {
             return
         }
         owner = client
-        if stopPending {
-            send(client.conn, .res(id: id, result: nil, error: .cancelled("Пользователь нажал «Стоп»")))
-            releaseLock()
+        if stopped {
+            // The lock idle timer keeps running from Stop; cancelled calls do not extend it.
+            send(client.conn, .res(id: id, result: nil, error: .cancelled(Self.stopMessage)))
             return
         }
         guard let name = params["name"]?.string else {
@@ -175,11 +179,11 @@ public final class Daemon {
 
     private func handleStop() {
         guard let o = owner else { return }
-        stopPending = true
+        stopped = true
         for (key, call) in inflight {
             call.responded = true
             call.task?.cancel()
-            send(o.conn, .res(id: call.id, result: nil, error: .cancelled("Пользователь нажал «Стоп»")))
+            send(o.conn, .res(id: call.id, result: nil, error: .cancelled(Self.stopMessage)))
             inflight.removeValue(forKey: key)
         }
         lockMonitor.arm()
@@ -187,7 +191,7 @@ public final class Daemon {
 
     private func releaseLock() {
         owner = nil
-        stopPending = false
+        stopped = false
         lockMonitor.disarm()
         if let e = ext { send(e.conn, .event(name: "idle", data: .object([:]))) }
     }
