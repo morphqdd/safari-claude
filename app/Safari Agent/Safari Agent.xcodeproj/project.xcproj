@@ -67,6 +67,7 @@
             { "path": "Resources/icons", "target-membership": [ "Safari Agent Extension/resources" ] },
             { "path": "Resources/manifest.json", "target-membership": [ "Safari Agent Extension/resources" ] },
             { "path": "Resources/bg", "target-membership": [ "Safari Agent Extension/resources" ] },
+            { "path": "Resources/chat", "target-membership": [ "Safari Agent Extension/resources" ] },
           ],
         },
         { "path": "SafariWebExtensionHandler.swift", "target-membership": [ "Safari Agent Extension/compile-sources" ] },
