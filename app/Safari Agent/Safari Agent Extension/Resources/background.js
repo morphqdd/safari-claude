@@ -17,6 +17,7 @@ SCLink.onEvent = (name, data) => {
     sendToTab(state.agentTab, { method: "overlay.status", params: { text: null } }).catch(() => {});
   }
 };
+SCLink.onClose = () => SCChat.onLinkLost(deps);
 browser.runtime.onMessage.addListener((msg) => {
   if (msg && msg.event === "stop") return Promise.resolve({ ok: !!SCLink.sendEvent("stop", {}) });
   return undefined;
