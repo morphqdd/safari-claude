@@ -58,13 +58,14 @@ Error codes: `busy`, `no_extension`, `no_agent_tab`, `site_not_allowed`, `risky_
 | `tabs.list` | `{}` | `{tabs:[{tabId,windowId,url,title,active,isAgent}]}` |
 | `tabs.create` | `{url?}` | `{tabId}`. Becomes the agent tab. |
 | `tabs.select` | `{tabId}` | `{}`. Marks as agent tab, does not activate. |
-| `tab.state` | `{}` | `{tabId,url,title,activeInWindow:Bool}` for the agent tab |
+| `tab.state` | `{}` | `{tabId,url,title,activeInWindow:Bool,windowFocused:Bool}` for the agent tab (`windowFocused` = `windows.get(windowId).focused`) |
 | `navigate` | `{url}` or `{action:"back"\|"forward"\|"reload"}` | `{url,title}` after load completes (timeout 30 s) |
 | `page.snapshot` | `{filter?:"interactive"\|"all"}` | `{text}` (format in Task 9) |
 | `page.find` | `{query}` | `{matches:[{ref,role,name}]}` |
 | `page.text` | `{ref?}` | `{text}` |
 | `el.prepare` | `{ref,action:"click"\|"type"\|"scroll"}` | `{marker,risk:{risky,kind?}}`. Scrolls into view, animates the cursor, adds class `marker`. Checks the site allow/deny list. |
 | `el.release` | `{ref}` | `{}`. Removes the marker, plays the click pulse. |
+| `el.submitRisk` | `{ref?}` | `{risky,kind?}`: `SC.classifyRisk` of the default submitter of the form containing `ref` (or `document.activeElement` when no ref); element not in a form → classify the element itself. |
 | `el.domClick` | `{ref}` | `{}` |
 | `el.focus` | `{ref}` | `{focused:Bool}` |
 | `el.domType` | `{ref,text}` | `{value}` |
@@ -369,6 +370,7 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
 - Produces:
   - `SC.prepare(ref, action) -> Promise<{marker, risk}>`. Throws `{code:"not_found", message:"Element <ref> is gone; call read_page again"}` if `resolve` is null. Then `scrollIntoView({block:"center"})`, then `await SC.overlay?.moveTo(el)`. Adds class `__sc_m_<ref>`.
   - `SC.release(ref)` (removes the marker, `SC.overlay?.pulse()`)
+  - `SC.submitRisk(ref?) -> {risky, kind?}`: the form's default submitter (`form.querySelector('[type=submit], button:not([type])')`) classified with `SC.classifyRisk`; if the element (or `document.activeElement`) is not in a form, classify the element itself. Test `submitRiskOfPaymentForm`: input inside a form whose submit button says «Оплатить» → `{risky:true, kind:"payment"}`; input in a plain search form → not risky.
   - `SC.domClick(ref)` (dispatches `pointerdown`, `mousedown`, `pointerup`, `mouseup`, `click` with element-centre `clientX/Y`, `bubbles`, `composed`)
   - `SC.focus(ref) -> boolean`
   - `SC.domType(ref, text) -> string`. Inputs/textareas: the native value setter from `HTMLInputElement.prototype`/`HTMLTextAreaElement.prototype`, then `input` and `change`. Contenteditable: `document.execCommand("insertText", false, text)`. Returns the final value.
@@ -416,6 +418,7 @@ After every tool, the runner sends `ext overlay.status` with no text change. The
     - Tab methods use the `browser.tabs` API. `tabs.create` → `{active:false}` next to the active tab (`index: active.index + 1`).
     - Page/el/overlay methods → `sendToTab(agentTab, {method, params})`. If that rejects with "no receiver", inject the content files with `tabs.executeScript(tabId, {file, allFrames:true})` in manifest order, then retry once.
     - `tab.screenshot` → `tabs.captureVisibleTab(windowId, {format:"png"})` only when the agent tab is active in its window, else `background_tab`.
+    - `tab.state` includes `windowFocused` from `browser.windows.get(windowId)`; `el.submitRisk` is routed to the agent tab like other `el.*` methods.
     - The `navigate` result waits for `tabs.onUpdated status:"complete"` (timeout 30 s).
     - Missing agent tab → `no_agent_tab`.
     - The content `stop` message → `link.sendEvent("stop")`.
