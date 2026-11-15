@@ -15,4 +15,6 @@ browser.runtime.onMessage.addListener((msg) => {
   if (msg && msg.event === "stop") return Promise.resolve({ ok: !!SCLink.sendEvent("stop", {}) });
   return undefined;
 });
+// Toolbar button = Stop that a page cannot hide or fake (same path as the overlay Stop).
+browser.browserAction?.onClicked?.addListener(() => { SCLink.sendEvent("stop", {}); });
 SCLink.connect();
