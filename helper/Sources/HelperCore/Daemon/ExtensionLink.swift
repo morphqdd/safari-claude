@@ -49,7 +49,8 @@ public final class ExtensionLink {
         return conn != nil
     }
 
-    /// `timeout` defaults to the link's request timeout (15 s).
+    /// `timeout` defaults to the link's request timeout (15 s); `.infinity` waits until answered,
+    /// cancelled, or the extension disconnects.
     public func request(_ method: String, _ params: JSON, timeout: TimeInterval? = nil) async throws -> JSON {
         let timeout = timeout ?? requestTimeout
         try await waitForConnection()
@@ -72,10 +73,10 @@ public final class ExtensionLink {
                 nextId += 1
                 pending[p.id] = p
                 let timer = DispatchWorkItem { [weak self] in self?.finish(p, .failure(RPCError.timeout())) }
-                p.timer = timer
+                if timeout.isFinite { p.timer = timer }
                 let id = p.id
                 lock.unlock()
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer)
+                if timeout.isFinite { DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timer) }
                 if let data = try? JSONEncoder().encode(Message.req(id: id, method: method, params: params)),
                    let text = String(data: data, encoding: .utf8) {
                     c.send(text)

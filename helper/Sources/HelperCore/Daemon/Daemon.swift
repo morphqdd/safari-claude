@@ -7,6 +7,8 @@ public final class Daemon {
     private final class Client {
         let conn: Connection
         var role: Role?
+        /// MCP process started by the chat's claude (its hello carried the current chat key).
+        var isChat = false
         var helloTimer: DispatchWorkItem?
         init(_ c: Connection) { conn = c }
     }
@@ -14,6 +16,8 @@ public final class Daemon {
         let id: Int
         var task: Task<Void, Never>?
         var responded = false
+        /// A chat confirm_action whose card is still waiting for the owner.
+        var confirming = false
         init(id: Int) { self.id = id }
     }
 
@@ -32,8 +36,14 @@ public final class Daemon {
     static let stopMessage = "Пользователь нажал «Стоп». Не повторяй действие — спроси пользователя, что делать дальше."
     private var inflight: [ObjectIdentifier: Call] = [:]
     private let axTrusted: () -> Bool
+    private var chat: ChatSession?
+    /// From chat.send to turnEnd the lock is held for the chat, even before its claude calls a tool.
+    private var chatReserved = false
+    static let deniedMessage = "Пользователь отказал"
 
+    /// `chat` builds the chat window's session on the daemon queue, with the daemon's event handler.
     public init(auth: Auth, tools: ToolHandling, idleExit: TimeInterval = 600, lockIdle: TimeInterval = 120,
+                chat: ((DispatchQueue, @escaping (ChatEvent) -> Void) -> ChatSession)? = nil,
                 axTrusted: @escaping () -> Bool = { AXIsProcessTrusted() },
                 exit: @escaping () -> Void = { Foundation.exit(0) }) {
         self.auth = auth
@@ -42,12 +52,15 @@ public final class Daemon {
         self.link = ExtensionLink()
         exitMonitor = IdleMonitor(queue: q, delay: idleExit) { [self] in
             guard clients.isEmpty else { return }
+            // claude may be between turns with its MCP process not connected; check again later.
+            if self.chat?.isRunning == true { exitMonitor.arm(); return }
             exit()
         }
         lockMonitor = IdleMonitor(queue: q, delay: lockIdle) { [self] in
-            guard owner != nil, inflight.isEmpty else { return }
+            guard owner != nil, inflight.isEmpty, !chatReserved else { return }
             releaseLock()
         }
+        self.chat = chat?(q) { [self] event in chatEvent(event) }
         q.async { self.exitMonitor.arm() }
     }
 
@@ -90,6 +103,10 @@ public final class Daemon {
         if let d = try? JSONEncoder().encode(m), let s = String(data: d, encoding: .utf8) { c.send(s) }
     }
 
+    private func sendExt(_ name: String, _ data: [String: JSON] = [:]) {
+        if let e = ext { send(e.conn, .event(name: name, data: .object(data))) }
+    }
+
     private func handle(_ client: Client, _ text: String) {
         guard clients[ObjectIdentifier(client.conn)] != nil else { return }
         guard let role = client.role else { handleHello(client, text); return }
@@ -97,9 +114,18 @@ public final class Daemon {
         switch (role, msg) {
         case (.extension_, .res(let id, let result, let error)):
             link.handleResponse(id: id, result: result, error: error)
-        case (.extension_, .event(let name, _)):
-            // Only the current extension connection may stop; a replaced one is ignored.
-            if name == "stop", client === ext { handleStop() }
+        case (.extension_, .event(let name, let data)):
+            // Only the current extension connection is listened to; a replaced one is ignored.
+            guard client === ext else { return }
+            switch name {
+            case "stop": handleStop()
+            case "chat.send": chatSend(data["text"]?.string ?? "")
+            case "chat.new":
+                chat?.interrupt()
+                chat?.reset()
+            case "chat.askPage": askPage(data["tabId"])
+            default: break
+            }
         case (.extension_, .req(let id, _, _)):
             send(client.conn, .res(id: id, result: nil, error: .badRequest("extension cannot send requests")))
         case (.mcp, .req(let id, let method, let params)):
@@ -119,12 +145,13 @@ public final class Daemon {
 
     private func handleHello(_ client: Client, _ text: String) {
         client.helloTimer?.cancel()
-        guard let hello = decode(text), case .hello(let role, _, _) = hello,
+        guard let hello = decode(text), case .hello(let role, _, let chatKey) = hello,
               auth.authorize(hello: hello, origin: client.conn.origin) else {
             client.conn.close(code: 4001)
             return
         }
         client.role = role
+        client.isChat = role == .mcp && chatKey != nil && chatKey == chat?.chatKey
         if role == .extension_ {
             if let old = ext {
                 old.conn.close(code: 4002)
@@ -139,7 +166,8 @@ public final class Daemon {
     // MARK: Tool calls and lock
 
     private func handleToolCall(_ client: Client, id: Int, params: JSON) {
-        if let o = owner, o !== client {
+        let blocked = chatReserved ? !client.isChat : owner.map { $0 !== client } ?? false
+        if blocked {
             send(client.conn, .res(id: id, result: nil, error: .busy("Safari занят другой сессией Claude")))
             return
         }
@@ -159,9 +187,14 @@ public final class Daemon {
         let key = ObjectIdentifier(call)
         inflight[key] = call
         let args = params["arguments"] ?? .object([:])
+        let confirm = name == "confirm_action" && client.isChat
+        call.confirming = confirm
         call.task = Task { [tools, link] in
             let result: Result<JSON, Error>
-            do { result = .success(try await tools.call(name: name, arguments: args, link: link)) }
+            do {
+                if confirm { result = .success(try await self.chatConfirm(call, args)) }
+                else { result = .success(try await tools.call(name: name, arguments: args, link: link)) }
+            }
             catch { result = .failure(error) }
             self.q.async { self.finish(call, client, result) }
         }
@@ -181,13 +214,35 @@ public final class Daemon {
         if owner === client && inflight.isEmpty { lockMonitor.arm() }
     }
 
+    /// Asks the owner in the chat window; runs the tool only if allowed. Called off-queue from the call's task.
+    private func chatConfirm(_ call: Call, _ args: JSON) async throws -> JSON {
+        // No timeout: the card waits for the owner. Stop cancels the task; a gone extension fails the request.
+        let decision = try? await link.request("chat.confirm", args, timeout: .infinity)["decision"]?.string
+        q.sync { call.confirming = false }
+        switch decision {
+        case "once" where args["kind"]?.string == "site":
+            guard let d = args["domain"]?.string else { throw RPCError.badRequest("missing argument: domain") }
+            _ = try await link.request("site.allowOnce", .object(["domain": .string(d)]))
+            return .object(["content": .array([.object(["type": .string("text"), "text": .string("allowed \(d) for this turn")])]),
+                            "isError": .bool(false)])
+        case "allow", "once", "always":
+            return try await tools.call(name: "confirm_action", arguments: args, link: link)
+        default:
+            throw RPCError.cancelled(Self.deniedMessage)
+        }
+    }
+
     private func handleStop() {
+        if chatReserved {
+            stopped = true
+            chat?.interrupt()
+        }
         guard let o = owner else { return }
         stopped = true
         for (key, call) in inflight {
             call.responded = true
             call.task?.cancel()
-            send(o.conn, .res(id: call.id, result: nil, error: .cancelled(Self.stopMessage)))
+            send(o.conn, .res(id: call.id, result: nil, error: .cancelled(call.confirming ? Self.deniedMessage : Self.stopMessage)))
             inflight.removeValue(forKey: key)
         }
         lockMonitor.arm()
@@ -198,6 +253,44 @@ public final class Daemon {
         stopped = false
         lockMonitor.disarm()
         if let e = ext { send(e.conn, .event(name: "idle", data: .object([:]))) }
+    }
+
+    // MARK: Chat window
+
+    private func chatSend(_ text: String) {
+        guard let chat else { return }
+        if let o = owner, !o.isChat { sendExt("chat.busy"); return }
+        let wasStopped = stopped
+        stopped = false
+        chatReserved = true
+        lockMonitor.disarm()
+        do { try chat.send(text) } catch {
+            // The current turn goes on as it was.
+            stopped = wasStopped
+            sendExt("chat.error", ["text": .string((error as? RPCError)?.message ?? "\(error)")])
+        }
+    }
+
+    private func chatEvent(_ event: ChatEvent) {
+        switch event {
+        case .delta(let text): sendExt("chat.delta", ["text": .string(text)])
+        case .action(let tool, let input): sendExt("chat.action", ["tool": .string(tool), "input": input])
+        case .notice(let text): sendExt("chat.notice", ["text": .string(text)])
+        case .error(let text): sendExt("chat.error", ["text": .string(text)])
+        case .turnEnd:
+            sendExt("chat.turnEnd")
+            chatReserved = false
+            // A Stop without an owner only guarded the turn; with an owner the normal lockIdle applies.
+            if owner == nil { stopped = false } else if inflight.isEmpty { lockMonitor.arm() }
+            // Sites allowed "once" last for one turn. Best-effort.
+            Task { [link] in _ = try? await link.request("site.clearOnce", .object([:])) }
+        }
+    }
+
+    private func askPage(_ tabId: JSON?) {
+        if let o = owner, !o.isChat { sendExt("chat.busy"); return }
+        guard let tabId else { return }
+        Task { [link] in _ = try? await link.request("tabs.select", .object(["tabId": tabId])) }
     }
 
     // MARK: Disconnect
