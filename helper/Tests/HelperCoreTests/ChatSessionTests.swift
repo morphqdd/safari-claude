@@ -493,20 +493,24 @@ private func eventually(_ timeout: TimeInterval = 2, _ cond: () -> Bool) async -
         }
     }
 
-    private static func openFds() -> Int {
-        (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? -1
+    /// Pipe identity of an fd, or nil once it is closed.
+    private static func pipeIdentity(_ fd: Int32) -> (dev_t, ino_t)? {
+        var st = stat()
+        return fstat(fd, &st) == 0 ? (st.st_dev, st.st_ino) : nil
     }
 
     @Test func failedStartClosesPipes() throws {
-        // Warm up anything Foundation opens lazily on the first failure.
-        _ = try? RealClaudeProcess(arguments: ["/nonexistent/claude"], environment: [:], cwd: FileManager.default.temporaryDirectory).start()
-        let before = Self.openFds()
-        for _ in 0..<10 {
-            let p = try RealClaudeProcess(arguments: ["/nonexistent/claude"], environment: [:], cwd: FileManager.default.temporaryDirectory)
-            #expect(throws: (any Error).self) { try p.start() }
+        let p = try RealClaudeProcess(arguments: ["/nonexistent/claude"], environment: [:], cwd: FileManager.default.temporaryDirectory)
+        let fds = p.pipeDescriptors
+        #expect(fds.count == 6)
+        let before = fds.map { Self.pipeIdentity($0) }
+        #expect(before.allSatisfy { $0 != nil })
+        #expect(throws: (any Error).self) { try p.start() }
+        // Closed: EBADF, or the number was already reused by a parallel test for a different file.
+        for (fd, id) in zip(fds, before) {
+            let now = Self.pipeIdentity(fd)
+            #expect(now == nil || now! != id!, "fd \(fd) still open")
         }
-        // Other suites run in parallel and open fds too; 60 leaked fds would stand out.
-        #expect(Self.openFds() - before < 30)
     }
 
     @Test func readAvailableNeitherBlocksNorChangesFlags() throws {
@@ -529,7 +533,7 @@ private func eventually(_ timeout: TimeInterval = 2, _ cond: () -> Bool) async -
     @Test func exitIsReportedWhileAChildHoldsStderr() async throws {
         let box = Box()
         // The background sleep inherits stderr and keeps it open past the shell's exit.
-        let p = try RealClaudeProcess(arguments: ["/bin/sh", "-c", "echo out; echo late >&2; sleep 3 >&2 & exit 5"],
+        let p = try RealClaudeProcess(arguments: ["/bin/sh", "-c", "echo out; echo late >&2; sleep 10 >&2 & exit 5"],
                                       environment: [:], cwd: FileManager.default.temporaryDirectory)
         p.onLine = { l in box.lock.lock(); box.lines.append(l); box.lock.unlock() }
         p.onExit = { c in box.lock.lock(); box.exit = c; box.linesAtExit = box.lines.count; box.lock.unlock() }

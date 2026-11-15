@@ -29,6 +29,8 @@ public final class RealClaudeProcess: ClaudeProcess {
     private var errTail = Data()
     /// Set on `io` by the exit drain; later readability callbacks read nothing.
     private var finished = false
+    /// The six pipe fds, taken at init (a closed FileHandle cannot be asked); tests check they get closed.
+    let pipeDescriptors: [Int32]
     private static let tailLimit = 4096
 
     public static let launcher: ClaudeLauncher = { args, env, cwd in
@@ -46,6 +48,7 @@ public final class RealClaudeProcess: ClaudeProcess {
         process.standardError = stderr
         // Writing after claude died must fail with EPIPE, not kill the daemon.
         _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        pipeDescriptors = [stdin, stdout, stderr].flatMap { [$0.fileHandleForReading.fileDescriptor, $0.fileHandleForWriting.fileDescriptor] }
 
         // Reads go through `poll`+`read` on `io`: FileHandle's availableData raises (and aborts the daemon)
         // on a read error, and reading on `io` keeps the order of chunks against the final drain at exit.
