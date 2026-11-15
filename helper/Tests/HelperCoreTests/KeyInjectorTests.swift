@@ -38,4 +38,32 @@ import Testing
         #expect(ev("a") == (0, [0x61]))
         #expect(ev("Я") == (0, [0x042F]))
     }
+
+    @Test func keyUpAlwaysFollowsPostedKeyDown() throws {
+        var front = false
+        var events: [Bool] = []
+        try KeyInjector.pair(isFrontmost: { front }) { down in
+            events.append(down)
+            front = true // Safari becomes frontmost right after the keyDown
+        }
+        #expect(events == [true, false])
+    }
+
+    @Test func frontmostBeforeKeyDownPostsNothing() {
+        var events: [Bool] = []
+        #expect(throws: RPCError.self) { try KeyInjector.pair(isFrontmost: { true }) { events.append($0) } }
+        #expect(events.isEmpty)
+    }
+
+    @Test func typeChunksStopsOnCancel() {
+        var posted: [[UInt16]] = []
+        do {
+            try KeyInjector.typeChunks("abcd", isCancelled: { posted.count >= 2 }) { posted.append($0) }
+            Issue.record("expected cancel")
+        } catch let e as RPCError {
+            #expect(e.code == "cancelled")
+            #expect(e.message == "Пользователь нажал «Стоп»")
+        } catch { Issue.record("unexpected \(error)") }
+        #expect(posted == [[0x61], [0x62]])
+    }
 }

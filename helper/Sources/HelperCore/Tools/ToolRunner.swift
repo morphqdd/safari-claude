@@ -60,10 +60,13 @@ private struct Run {
         if Task.isCancelled { throw RPCError.cancelled("Пользователь нажал «Стоп»") }
     }
 
-    func ext(_ method: String, _ params: [String: JSON] = [:]) async throws -> JSON {
+    /// Extension-side page loads wait up to 30 s, so navigation requests get a longer link timeout.
+    static let navigationTimeout: TimeInterval = 35
+
+    func ext(_ method: String, _ params: [String: JSON] = [:], timeout: TimeInterval? = nil) async throws -> JSON {
         try checkCancelled()
         let r: JSON
-        do { r = try await link.request(method, .object(params)) }
+        do { r = try await link.request(method, .object(params), timeout: timeout) }
         catch {
             if Task.isCancelled { throw RPCError.cancelled("Пользователь нажал «Стоп»") }
             throw error
@@ -90,6 +93,15 @@ private struct Run {
 
     func resultText(_ r: JSON, _ key: String) -> String { r[key]?.string ?? "" }
 
+    /// Only http:, https: and about:blank may be opened.
+    static func checkURL(_ u: String, tool: String) throws {
+        if u == "about:blank" { return }
+        let scheme = URL(string: u)?.scheme?.lowercased()
+        if scheme != "http" && scheme != "https" {
+            throw RPCError.badRequest("\(tool): only http, https and about:blank URLs are allowed")
+        }
+    }
+
     // MARK: simple 1:1 tools
 
     func tabsList() async throws -> JSON {
@@ -105,8 +117,11 @@ private struct Run {
 
     func tabCreate() async throws -> JSON {
         var p: [String: JSON] = [:]
-        if let u = try str("url", required: false) { p["url"] = .string(u) }
-        let r = try await ext("tabs.create", p)
+        if let u = try str("url", required: false) {
+            try Self.checkURL(u, tool: tool)
+            p["url"] = .string(u)
+        }
+        let r = try await ext("tabs.create", p, timeout: Self.navigationTimeout)
         return Self.text("agent tab \(r["tabId"]?.int ?? 0)")
     }
 
@@ -118,11 +133,13 @@ private struct Run {
 
     func navigate() async throws -> JSON {
         var p: [String: JSON] = [:]
-        if let u = try str("url", required: false) { p["url"] = .string(u) }
-        else if let a = try str("action", required: false) { p["action"] = .string(a) }
+        if let u = try str("url", required: false) {
+            try Self.checkURL(u, tool: tool)
+            p["url"] = .string(u)
+        } else if let a = try str("action", required: false) { p["action"] = .string(a) }
         else { throw RPCError.badRequest("navigate: missing url or action") }
         try await status("Открываю \(p["url"]?.string ?? p["action"]?.string ?? "")")
-        let r = try await ext("navigate", p)
+        let r = try await ext("navigate", p, timeout: Self.navigationTimeout)
         return Self.text("\(resultText(r, "title")) — \(resultText(r, "url"))")
     }
 
@@ -266,7 +283,13 @@ private struct Run {
                 do {
                     try actuator.press(marker: marker, pageURL: resultText(state, "url"))
                     return true
-                } catch {}
+                } catch let e as RPCError where e.code == "not_found" {
+                    // The element was not reachable through AX, so nothing was pressed: use DOM events.
+                } catch {
+                    // The press may have happened; a DOM retry could click twice.
+                    let detail = (error as? RPCError)?.message ?? "\(error)"
+                    throw RPCError.internal("click may or may not have happened: \(detail); check the page with read_page before retrying")
+                }
             }
             _ = try await ext("el.domClick", ["ref": .string(ref)])
             return false
@@ -274,11 +297,22 @@ private struct Run {
         return Self.text("clicked (\(trusted ? "trusted" : "dom"))")
     }
 
-    /// Trusted keyboard input only when the tab is active in a focused window but Safari is not frontmost.
+    /// Trusted keyboard input only when the tab is active in a focused window, Safari is not frontmost,
+    /// and Safari's keyboard focus is inside the agent tab's web content (not the address bar etc.).
     func useKeys() async throws -> Bool {
         let state = try await ext("tab.state")
-        return state["activeInWindow"]?.bool == true && state["windowFocused"]?.bool == true
-            && !actuator.isSafariFrontmost()
+        guard state["activeInWindow"]?.bool == true, state["windowFocused"]?.bool == true,
+              !actuator.isSafariFrontmost() else { return false }
+        try checkCancelled()
+        return actuator.webContentHasFocus(pageURL: resultText(state, "url"))
+    }
+
+    /// Cmd/Ctrl combos other than Cmd+A/C/V/X/Z could reach Safari's own UI (Cmd+W, Cmd+Q, Cmd+L...),
+    /// so they are never posted as real keystrokes.
+    static func trustedComboAllowed(_ c: KeyCombo) -> Bool {
+        if c.modifiers.contains(.maskControl) { return false }
+        if !c.modifiers.contains(.maskCommand) { return true }
+        return c.modifiers == .maskCommand && ["a", "c", "v", "x", "z"].contains(c.key.lowercased())
     }
 
     func type(confirmed: Bool) async throws -> JSON {
@@ -286,7 +320,9 @@ private struct Run {
         guard let text = args["text"]?.string else { throw RPCError.badRequest("type: missing text") }
         let submit = args["submit"]?.bool == true
         let enter = try KeyCombo.parse("Enter")
-        if submit && !confirmed { try await checkSubmitRisk(ref: ref, kind: "type") }
+        // A newline in the text becomes a real Return on the trusted path, so it is gated like submit.
+        let newline = text.unicodeScalars.contains { $0 == "\n" || $0 == "\r" }
+        if (submit || newline) && !confirmed { try await checkSubmitRisk(ref: ref, kind: "type") }
         try await status("Ввожу текст в \(ref)")
         var trusted = false
         try await withElement(ref, action: "type", checkRisk: !confirmed) { _ -> Void in
@@ -315,9 +351,14 @@ private struct Run {
     func key(confirmed: Bool) async throws -> JSON {
         let combo = try req("combo")
         let parsed = try KeyCombo.parse(combo)
-        if parsed.key == "Enter" && !confirmed { try await checkSubmitRisk(ref: nil, kind: "key") }
+        _ = try await ext("site.check")
+        // Enter submits forms and Space activates a focused button: both are gated.
+        if (parsed.key == "Enter" || parsed.key == "Space") && !confirmed {
+            try await checkSubmitRisk(ref: nil, kind: "key")
+        }
         try await status("Нажимаю \(combo)")
-        let trusted = try await useKeys()
+        var trusted = false
+        if Self.trustedComboAllowed(parsed) { trusted = try await useKeys() }
         if trusted {
             try checkCancelled()
             try actuator.postCombo(parsed)

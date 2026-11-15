@@ -7,6 +7,7 @@ final class FakeActuator: Actuator, @unchecked Sendable {
     private(set) var calls: [String] = []
     var frontmost = false
     var pressError: Error?
+    var webFocus = true
     func record(_ s: String) { lock.lock(); calls.append(s); lock.unlock() }
     func press(marker: String, pageURL: String) throws {
         record("press:\(marker):\(pageURL)")
@@ -15,6 +16,7 @@ final class FakeActuator: Actuator, @unchecked Sendable {
     func isSafariFrontmost() -> Bool { frontmost }
     func postText(_ text: String) throws { record("postText:\(text)") }
     func postCombo(_ combo: KeyCombo) throws { record("postCombo:\(combo.key)") }
+    func webContentHasFocus(pageURL: String) -> Bool { webFocus }
 }
 
 /// Extension side of a link: answers each request by method name and records the methods.
@@ -27,13 +29,14 @@ final class ScriptedExtension: Connection, @unchecked Sendable {
     var responder: (String, JSON) -> Result<JSON, RPCError> = { _, _ in .success(.object([:])) }
     weak var link: ExtensionLink?
     var hold: Set<String> = []
+    var delays: [String: TimeInterval] = [:]
     var methods: [String] { lock.lock(); defer { lock.unlock() }; return _methods }
     func send(_ text: String) {
         guard case .req(let id, let method, let params)? = try? JSONDecoder().decode(Message.self, from: Data(text.utf8)) else { return }
         lock.lock(); _methods.append(method); lock.unlock()
         if hold.contains(method) { return }
         let r = responder(method, params)
-        DispatchQueue.global().async {
+        DispatchQueue.global().asyncAfter(deadline: .now() + (delays[method] ?? 0)) {
             switch r {
             case .success(let j): self.link?.handleResponse(id: id, result: j, error: nil)
             case .failure(let e): self.link?.handleResponse(id: id, result: nil, error: e)
@@ -46,12 +49,13 @@ final class ScriptedExtension: Connection, @unchecked Sendable {
 private func obj(_ d: [String: JSON]) -> JSON { .object(d) }
 
 private struct Rig {
-    let link = ExtensionLink()
+    let link: ExtensionLink
     let ext = ScriptedExtension()
     let actuator = FakeActuator()
     let runner: ToolRunner
     init(active: Bool = true, risky: Bool = false, windowFocused: Bool = true, focused: Bool = true,
-         submitRisky: Bool = false, hold: Set<String> = [], extra: @escaping (String, JSON) -> Result<JSON, RPCError>? = { _, _ in nil }) {
+         submitRisky: Bool = false, hold: Set<String> = [], requestTimeout: TimeInterval = 15, extra: @escaping (String, JSON) -> Result<JSON, RPCError>? = { _, _ in nil }) {
+        link = ExtensionLink(requestTimeout: requestTimeout)
         runner = ToolRunner(actuator: actuator, pollInterval: 0.01, findTimeout: 0.1)
         ext.link = link
         ext.hold = hold
@@ -93,10 +97,16 @@ private struct Rig {
         #expect(rig.ext.methods.contains("el.domClick"))
     }
 
-    @Test func clickFallsBackToDomOnInternalAXError() async throws {
+    @Test func clickInternalAXErrorDoesNotRetryWithDom() async throws {
         let rig = Rig()
-        rig.actuator.pressError = RPCError.internal("Safari is not responding")
-        #expect(try await rig.run("click", ["ref": .string("e1")]) == "clicked (dom)")
+        rig.actuator.pressError = RPCError.internal("AXPress failed: -25200")
+        do { _ = try await rig.run("click", ["ref": .string("e1")]); Issue.record("expected error") }
+        catch let e as RPCError {
+            #expect(e.code == "internal")
+            #expect(e.message == "click may or may not have happened: AXPress failed: -25200; check the page with read_page before retrying")
+        }
+        #expect(!rig.ext.methods.contains("el.domClick"))
+        #expect(rig.ext.methods.last == "el.release")
     }
 
     @Test func clickInBackgroundTabUsesDom() async throws {
@@ -293,5 +303,113 @@ private struct Rig {
         let rig = Rig(submitRisky: true)
         #expect(try await rig.run("confirm_action", ["kind": .string("key"), "combo": .string("Enter")]) == "pressed Enter (trusted)")
         #expect(rig.actuator.calls == ["postCombo:Enter"])
+    }
+
+    // MARK: final-review fixes
+
+    private func expectCode(_ code: String, _ body: () async throws -> Void) async {
+        do { try await body(); Issue.record("expected \(code)") }
+        catch let e as RPCError { #expect(e.code == code, "\(e)") } catch { Issue.record("unexpected error \(error)") }
+    }
+
+    @Test func typeWithNewlineChecksSubmitRisk() async {
+        for text in ["a\nb", "a\rb", "a\r\nb"] {
+            let rig = Rig(submitRisky: true)
+            await expectCode("risky_requires_confirmation") { _ = try await rig.run("type", ["ref": .string("e1"), "text": .string(text)]) }
+            #expect(rig.actuator.calls.isEmpty)
+            #expect(!rig.ext.methods.contains("el.domType"))
+        }
+    }
+
+    @Test func typeWithNewlineSafeFormTypes() async throws {
+        let rig = Rig()
+        #expect(try await rig.run("type", ["ref": .string("e1"), "text": .string("a\nb")]).hasPrefix("typed (trusted)"))
+        #expect(rig.ext.methods.contains("el.submitRisk"))
+    }
+
+    @Test func typeWithoutNewlineOrSubmitSkipsSubmitRisk() async throws {
+        let rig = Rig(submitRisky: true)
+        #expect(try await rig.run("type", ["ref": .string("e1"), "text": .string("ab")]).hasPrefix("typed (trusted)"))
+        #expect(!rig.ext.methods.contains("el.submitRisk"))
+    }
+
+    @Test func confirmTypeWithNewlineSkipsSubmitRisk() async throws {
+        let rig = Rig(submitRisky: true)
+        let t = try await rig.run("confirm_action", ["kind": .string("type"), "ref": .string("e1"), "text": .string("a\nb")])
+        #expect(t.hasPrefix("typed (trusted)"))
+        #expect(!rig.ext.methods.contains("el.submitRisk"))
+    }
+
+    @Test func riskySpaceViaKeyRequiresConfirmation() async {
+        let rig = Rig(submitRisky: true)
+        await expectCode("risky_requires_confirmation") { _ = try await rig.run("key", ["combo": .string("Space")]) }
+        #expect(rig.actuator.calls.isEmpty)
+        #expect(!rig.ext.methods.contains("el.domKey"))
+    }
+
+    @Test func confirmSpacePresses() async throws {
+        let rig = Rig(submitRisky: true)
+        #expect(try await rig.run("confirm_action", ["kind": .string("key"), "combo": .string("Space")]) == "pressed Space (trusted)")
+    }
+
+    @Test func safariUICombosNeverTrusted() async throws {
+        for combo in ["Cmd+w", "Cmd+q", "Cmd+l", "Cmd+t", "Cmd+n", "Ctrl+a", "Ctrl+Tab", "Cmd+Shift+z", "Cmd+Alt+c"] {
+            let rig = Rig()
+            #expect(try await rig.run("key", ["combo": .string(combo)]) == "pressed \(combo) (dom)")
+            #expect(rig.actuator.calls.isEmpty, "\(combo)")
+            #expect(rig.ext.methods.contains("el.domKey"))
+        }
+    }
+
+    @Test func editingCombosStayTrusted() async throws {
+        for combo in ["Cmd+a", "Cmd+c", "Cmd+v", "Cmd+x", "Cmd+z", "Shift+Tab", "Alt+ArrowLeft"] {
+            let rig = Rig()
+            #expect(try await rig.run("key", ["combo": .string(combo)]) == "pressed \(combo) (trusted)")
+        }
+    }
+
+    @Test func noWebContentFocusUsesDom() async throws {
+        let k = Rig()
+        k.actuator.webFocus = false
+        #expect(try await k.run("key", ["combo": .string("Tab")]) == "pressed Tab (dom)")
+        #expect(k.actuator.calls.isEmpty)
+        let t = Rig()
+        t.actuator.webFocus = false
+        #expect(try await t.run("type", ["ref": .string("e1"), "text": .string("abc"), "submit": .bool(true)]).hasPrefix("typed (dom)"))
+        #expect(t.actuator.calls.isEmpty)
+        #expect(t.ext.methods.contains("el.domType"))
+    }
+
+    @Test func keyChecksSiteFirst() async {
+        let rig = Rig(extra: { m, _ in m == "site.check" ? .failure(RPCError.siteNotAllowed("x")) : nil })
+        await expectCode("site_not_allowed") { _ = try await rig.run("key", ["combo": .string("a")]) }
+        #expect(rig.actuator.calls.isEmpty)
+        #expect(!rig.ext.methods.contains("el.domKey"))
+        let ok = Rig()
+        _ = try? await ok.run("key", ["combo": .string("a")])
+        #expect(ok.ext.methods.first == "site.check")
+    }
+
+    @Test func navigationOutlivesDefaultRequestTimeout() async throws {
+        let rig = Rig(requestTimeout: 0.2, extra: { m, _ in
+            m == "navigate" || m == "tabs.create" ? .success(obj(["url": .string("https://b.test/"), "title": .string("B"), "tabId": .number(3)])) : nil })
+        rig.ext.delays = ["navigate": 0.5, "tabs.create": 0.5, "page.snapshot": 0.5]
+        #expect(try await rig.run("navigate", ["url": .string("https://b.test/")]) == "B — https://b.test/")
+        #expect(try await rig.run("tab_create", ["url": .string("https://b.test/")]) == "agent tab 3")
+        await expectCode("timeout") { _ = try await rig.run("read_page", [:]) }
+    }
+
+    @Test func urlSchemesRestricted() async throws {
+        for (tool, u) in [("navigate", "javascript:alert(1)"), ("navigate", "file:///etc/passwd"), ("tab_create", "data:text/html,x"),
+                          ("navigate", "about:config"), ("tab_create", "safari-web-extension://x/"), ("navigate", "example.com")] {
+            let rig = Rig()
+            await expectCode("bad_request") { _ = try await rig.run(tool, ["url": .string(u)]) }
+            #expect(!rig.ext.methods.contains("navigate") && !rig.ext.methods.contains("tabs.create"), "\(u)")
+        }
+        for u in ["https://a.test/", "HTTP://a.test/", "about:blank"] {
+            let rig = Rig()
+            _ = try await rig.run("navigate", ["url": .string(u)])
+            #expect(rig.ext.methods.contains("navigate"))
+        }
     }
 }

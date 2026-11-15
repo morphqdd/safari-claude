@@ -77,15 +77,33 @@ public enum KeyInjector {
     }
 
     static let frontmostMessage = "Safari стал активным — ввод остановлен"
+    static let cancelledMessage = "Пользователь нажал «Стоп»"
 
-    /// Posts one keyDown/keyUp pair to `pid`. `isFrontmost` is re-checked before each event.
+    /// Emits one keyDown/keyUp pair. `isFrontmost` is checked before the keyDown only: once a keyDown
+    /// is posted its keyUp is always posted too, so no key is left stuck down.
+    static func pair(isFrontmost: () -> Bool, emit: (_ down: Bool) throws -> Void) throws {
+        if isFrontmost() { throw RPCError.cancelled(frontmostMessage) }
+        try emit(true)
+        try emit(false)
+    }
+
+    /// Feeds `text` chunk by chunk, checking `isCancelled` (Stop) before each chunk.
+    static func typeChunks(_ text: String, isCancelled: () -> Bool, post: ([UInt16]) throws -> Void) throws {
+        for chunk in chunks(text) {
+            if isCancelled() { throw RPCError.cancelled(cancelledMessage) }
+            try post(chunk)
+        }
+    }
+
+    /// Posts one keyDown/keyUp pair to `pid`.
     static func post(pid: pid_t, vk: CGKeyCode, units: [UInt16]?, flags: CGEventFlags,
                      isFrontmost: () -> Bool) throws {
-        for down in [true, false] {
-            if isFrontmost() { throw RPCError.cancelled(frontmostMessage) }
-            guard let e = CGEvent(keyboardEventSource: nil, virtualKey: vk, keyDown: down) else {
-                throw RPCError.internal("CGEvent creation failed")
-            }
+        guard let downEv = CGEvent(keyboardEventSource: nil, virtualKey: vk, keyDown: true),
+              let upEv = CGEvent(keyboardEventSource: nil, virtualKey: vk, keyDown: false) else {
+            throw RPCError.internal("CGEvent creation failed")
+        }
+        try pair(isFrontmost: isFrontmost) { down in
+            let e = down ? downEv : upEv
             if let units { e.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units) }
             e.flags = flags
             e.postToPid(pid)
@@ -96,7 +114,7 @@ public enum KeyInjector {
 extension AXActuator {
     public func postText(_ text: String) throws {
         guard let pid = SafariLocator.safariPid() else { throw RPCError.notFound("Safari is not running") }
-        for chunk in KeyInjector.chunks(text) {
+        try KeyInjector.typeChunks(text, isCancelled: { Task.isCancelled }) { chunk in
             let (vk, units) = KeyInjector.keyEvent(for: chunk)
             let s = String(decoding: chunk, as: UTF16.self)
             let upper = units != nil && s.unicodeScalars.count == 1 && s.unicodeScalars.first!.isASCII

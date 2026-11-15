@@ -5,6 +5,8 @@ public protocol Actuator {
     func isSafariFrontmost() -> Bool
     func postText(_ text: String) throws
     func postCombo(_ combo: KeyCombo) throws
+    /// True when Safari's focused UI element is inside the AXWebArea showing `pageURL`. Read-only.
+    func webContentHasFocus(pageURL: String) -> Bool
 }
 
 public final class AXActuator: Actuator {
@@ -21,6 +23,25 @@ public final class AXActuator: Actuator {
         }
         let err = el.perform(kAXPressAction as String)
         if err != .success { throw RPCError.internal("AXPress failed: \(err.rawValue)") }
+    }
+
+    /// Reads AXFocusedUIElement of the Safari app element and walks AXParent up to the agent tab's
+    /// web area. Read-only attribute access; never sets focus. Any failure means "no".
+    public func webContentHasFocus(pageURL: String) -> Bool {
+        guard let pid = SafariLocator.safariPid(),
+              let area = try? SafariLocator.webArea(url: pageURL) else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, SafariLocator.messagingTimeout)
+        guard let focused = AXElement(app).attr("AXFocusedUIElement"),
+              CFGetTypeID(focused) == AXUIElementGetTypeID() else { return false }
+        var cur: AXElement? = AXElement(focused as! AXUIElement)
+        for _ in 0..<80 {
+            guard let e = cur else { return false }
+            if e.isSame(as: area) { return true }
+            guard let parent = e.attr("AXParent"), CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            cur = AXElement(parent as! AXUIElement)
+        }
+        return false
     }
 
     static func find(_ e: AXElement, marker: String, depth: Int) -> AXElement? {

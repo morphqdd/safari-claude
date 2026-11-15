@@ -37,9 +37,11 @@ public final class ExtensionLink {
     private var nextId = 1
     private var nextWaiter = 1
     private let connectWait: TimeInterval
+    private let requestTimeout: TimeInterval
 
-    init(connectWait: TimeInterval = 3) {
+    init(connectWait: TimeInterval = 3, requestTimeout: TimeInterval = 15) {
         self.connectWait = connectWait
+        self.requestTimeout = requestTimeout
     }
 
     public var isConnected: Bool {
@@ -47,7 +49,9 @@ public final class ExtensionLink {
         return conn != nil
     }
 
-    public func request(_ method: String, _ params: JSON, timeout: TimeInterval = 15) async throws -> JSON {
+    /// `timeout` defaults to the link's request timeout (15 s).
+    public func request(_ method: String, _ params: JSON, timeout: TimeInterval? = nil) async throws -> JSON {
+        let timeout = timeout ?? requestTimeout
         try await waitForConnection()
         let p = Pending()
         return try await withTaskCancellationHandler {
