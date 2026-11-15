@@ -49,6 +49,32 @@ public enum Installer {
         exists(preferredClaude) ? preferredClaude : "claude"
     }
 
+    /// Absolute path of `claude`: the preferred location, else what `which` finds; nil when neither is absolute.
+    static func resolveClaude() -> String? {
+        if FileManager.default.isExecutableFile(atPath: preferredClaude) { return preferredClaude }
+        let found = run("/usr/bin/which", ["claude"]).out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return found.hasPrefix("/") ? found : nil
+    }
+
+    /// Saves only an absolute path; returns whether it was saved.
+    @discardableResult
+    static func persistClaudePath(_ path: String?, to file: URL = Paths.claudePath) -> Bool {
+        guard let path, path.hasPrefix("/") else { return false }
+        return (try? writeClaudePath(path, to: file)) != nil
+    }
+
+    public static func writeClaudePath(_ path: String, to file: URL = Paths.claudePath) throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try path.write(to: file, atomically: true, encoding: .utf8)
+    }
+
+    /// The daemon runs under launchd without the user's PATH, so it reads the path saved at install.
+    public static func readClaudePath(from file: URL = Paths.claudePath) -> String {
+        let saved = (try? String(contentsOf: file, encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return saved.isEmpty ? claudeExecutable() : saved
+    }
+
     /// False when `source` already is `destination` (running `install` from the installed binary).
     public static func needsCopy(source: URL, destination: URL) -> Bool {
         source.standardizedFileURL.resolvingSymlinksInPath().path
@@ -78,7 +104,8 @@ public enum Installer {
 
     public static func tokenPresent() -> Bool { FileManager.default.fileExists(atPath: Paths.token.path) }
 
-    public static func removeFiles(_ urls: [URL] = [Paths.plist, Paths.installedBinary, Paths.token]) throws {
+    public static func removeFiles(_ urls: [URL] = [Paths.plist, Paths.installedBinary, Paths.token,
+                                              Paths.claudePath, Paths.chatSession, Paths.workspace]) throws {
         let fm = FileManager.default
         for url in urls where fm.fileExists(atPath: url.path) {
             try fm.removeItem(at: url)
@@ -142,7 +169,13 @@ public enum Installer {
         try runChecked("launchctl", ["bootstrap", domain, Paths.plist.path])
         print("LaunchAgent загружен: \(Paths.plist.path)")
 
-        let claude = claudeExecutable()
+        let resolved = resolveClaude()
+        if resolved == nil {
+            print("⚠️ claude не найден: окно чата не сможет его запустить. Установите Claude Code и повторите install.")
+        } else if !persistClaudePath(resolved) {
+            print("⚠️ Не удалось сохранить путь к claude (\(Paths.claudePath.path)): окно чата может не найти claude. Повторите install.")
+        }
+        let claude = resolved ?? claudeExecutable()
         let args = claudeAddArguments(binary: dest)
         let r = run(claude, args)
         if r.status == 0 {
@@ -165,11 +198,11 @@ public enum Installer {
 
     public static func uninstall() throws {
         run("launchctl", ["bootout", "\(domain)/\(label)"])
-        let claude = claudeExecutable()
+        let claude = readClaudePath()
         let r = run(claude, ["mcp", "remove", "--scope", "user", "safari"])
         if r.status != 0 { print("⚠️ claude mcp remove не выполнено; при необходимости: \(claude) mcp remove --scope user safari") }
         try removeFiles()
-        print("Удалено: LaunchAgent, бинарник, токен. Приложение Safari Agent удалите вручную из ~/Applications.")
+        print("Удалено: LaunchAgent, бинарник, токен, данные чата. Приложение Safari Agent удалите вручную из ~/Applications.")
     }
 
     public static func status() -> String {

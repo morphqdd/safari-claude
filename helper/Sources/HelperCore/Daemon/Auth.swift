@@ -34,7 +34,7 @@ public final class Auth {
     }
 
     public func authorize(hello: Message, origin: String?) -> Bool {
-        guard case .hello(let role, let token) = hello else { return false }
+        guard case .hello(let role, let token, _) = hello else { return false }
         switch role {
         case .extension_:
             return origin?.hasPrefix("safari-web-extension://") ?? false

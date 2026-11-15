@@ -27,6 +27,8 @@
   const SCLink = (globalThis.SCLink = {
     onRequest: async () => ({}),
     onEvent: () => {},
+    // Called on every close, including failed reconnect attempts.
+    onClose: () => {},
     connect() {
       let sock;
       try {
@@ -46,6 +48,7 @@
       };
       sock.onclose = () => {
         if (ws === sock) ws = null;
+        SCLink.onClose();
         schedule();
       };
     },

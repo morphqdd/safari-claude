@@ -166,6 +166,13 @@
     return el && isLive(el) ? el : null;
   };
 
+  // Role and name of a ref, named as in the snapshot (for confirmation cards).
+  SC.describe = (ref) => {
+    const el = SC.resolve(ref);
+    if (!el) throw { code: "not_found", message: `Element ${ref} is gone; call read_page again` };
+    return { role: roleOf(el), name: nameOf(el) };
+  };
+
   SC.find = (query) => {
     const q = String(query).toLowerCase();
     return collect("interactive")

@@ -6,7 +6,11 @@ func runDaemon() -> Never {
     let args = Array(CommandLine.arguments.dropFirst(2))
     if let i = args.firstIndex(of: "--dev-port"), i + 1 < args.count { devPort = UInt16(args[i + 1]) }
     do {
-        let daemon = Daemon(auth: Auth(), tools: ToolRunner(actuator: AXActuator()))
+        let claudePath = Installer.readClaudePath()
+        let daemon = Daemon(auth: Auth(), tools: ToolRunner(actuator: AXActuator()), chat: { queue, emit in
+            ChatSession(queue: queue, launcher: RealClaudeProcess.launcher, claudePath: claudePath,
+                        helperPath: Paths.installedBinary.path, emit: emit)
+        })
         try daemon.serve(devPort: devPort)
         withExtendedLifetime(daemon) { dispatchMain() }
     } catch {
@@ -23,7 +27,8 @@ func runMCP() -> Never {
         FileHandle.standardError.write(Data("mcp: cannot load token: \(error)\n".utf8))
         exit(1)
     }
-    let client = DaemonClient(port: port, token: token)
+    let client = DaemonClient(port: port, token: token,
+                              chatKey: ProcessInfo.processInfo.environment["SC_CHAT_KEY"])
     let server = MCPServer(forward: { name, args in try await client.call(name, args) })
     Task {
         do {

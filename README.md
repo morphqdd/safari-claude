@@ -17,14 +17,23 @@ Claude in Safari for Claude Code. Claude can open pages in your real Safari, rea
 
 Check the setup with `safari-claude-helper status`. Remove everything with `safari-claude-helper uninstall`.
 
+## Chat window
+
+Talk to Claude without a terminal. Open the chat with the Safari Agent toolbar button, Control+Shift+K, or the page context menu item "Ask Claude about this page" (that tab becomes the agent tab). The chat runs headless Claude Code on your subscription with only the Safari tools: no shell, no files.
+
+- Risky clicks and new sites ask for confirmation with a card in the chat.
+- Stop in the chat or on the page badge halts the current task, including one started from a terminal.
+- The conversation continues until you start a new chat and survives a Safari restart. Claude Code exits after 5 minutes without messages.
+- If Claude Code in a terminal is already driving Safari, the chat reports that Safari is busy.
+
 ## Safety
 
 - Risky actions (payments, form submits, deletes, new sites) go through the `confirm_action` tool. Never allow it permanently, and never allow `mcp__safari__*` as a whole.
 - Banking and password manager sites are blocked by default.
-- Press Stop on the page badge or the toolbar button to halt the agent.
+- Press Stop on the page badge or in the chat window to halt the agent.
 
 ## Limitations
 
 - Typing uses DOM events, because Safari does not report keyboard focus while it is in the background. Sites that accept only real key presses may ignore it.
 - Screenshots work only for the active tab of a window.
-- No chat panel inside Safari yet.
+- The context menu item is in English: Safari garbles non-ASCII menu titles.

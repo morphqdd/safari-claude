@@ -35,7 +35,9 @@ if [ "$install" = 1 ]; then
   cp -R "$APP" "$HOME/Applications/Safari Agent.app"
   # Otherwise Safari lists the build copy as a second "Safari Agent".
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$APP" 2>/dev/null || true
-  echo "Установлено: ~/Applications/Safari Agent.app (откройте его один раз)"
+  # Safari picks up the new extension build only after the container app runs.
+  open "$HOME/Applications/Safari Agent.app"
+  echo "Установлено и открыто: ~/Applications/Safari Agent.app"
 else
   echo "Собрано: $APP"
 fi

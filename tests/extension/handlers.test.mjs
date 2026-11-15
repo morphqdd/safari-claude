@@ -333,7 +333,7 @@ test("background: idle hides overlay, content stop forwards event", async () => 
     runtime: { onMessage: { addListener: (f) => { onMsg = f; } } },
   };
   const ctx = vm.createContext({ console, JSON, Promise, WebSocket: WS, setTimeout: () => 1, browser });
-  for (const f of ["bg/link.js", "bg/handlers.js", "background.js"]) vm.runInContext(readFileSync(`extension/${f}`, "utf8"), ctx);
+  for (const f of ["bg/link.js", "bg/handlers.js", "bg/chat.js", "background.js"]) vm.runInContext(readFileSync(`extension/${f}`, "utf8"), ctx);
   const ws = sockets[0];
   // no agent tab yet: idle is a no-op
   ws.onmessage({ data: JSON.stringify({ type: "event", name: "idle", data: {} }) });

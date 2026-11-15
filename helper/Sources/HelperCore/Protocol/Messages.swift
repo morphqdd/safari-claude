@@ -72,14 +72,14 @@ public struct RPCError: Codable, Equatable, Error, Sendable {
 }
 
 public enum Message: Codable, Equatable {
-    case hello(role: Role, token: String?)
+    case hello(role: Role, token: String?, chat: String? = nil)
     case welcome
     case req(id: Int, method: String, params: JSON)
     case res(id: Int, result: JSON?, error: RPCError?)
     case event(name: String, data: JSON)
 
     private enum Keys: String, CodingKey {
-        case type, role, token, id, method, params, result, error, name, data
+        case type, role, token, chat, id, method, params, result, error, name, data
     }
 
     public init(from decoder: Decoder) throws {
@@ -88,7 +88,8 @@ public enum Message: Codable, Equatable {
         switch type {
         case "hello":
             self = .hello(role: try c.decode(Role.self, forKey: .role),
-                          token: try c.decodeIfPresent(String.self, forKey: .token))
+                          token: try c.decodeIfPresent(String.self, forKey: .token),
+                          chat: try c.decodeIfPresent(String.self, forKey: .chat))
         case "welcome":
             self = .welcome
         case "req":
@@ -110,10 +111,11 @@ public enum Message: Codable, Equatable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: Keys.self)
         switch self {
-        case .hello(let role, let token):
+        case .hello(let role, let token, let chat):
             try c.encode("hello", forKey: .type)
             try c.encode(role, forKey: .role)
             try c.encodeIfPresent(token, forKey: .token)
+            try c.encodeIfPresent(chat, forKey: .chat)
         case .welcome:
             try c.encode("welcome", forKey: .type)
         case .req(let id, let method, let params):

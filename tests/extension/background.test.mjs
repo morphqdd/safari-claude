@@ -28,23 +28,35 @@ test("linkIsConnectedAndSendEventResult", () => {
   assert.equal(L.isConnected(), false);
 });
 
+test("linkReportsClose", () => {
+  const { ctx, socks } = loadLink();
+  const L = ctx.SCLink;
+  let closed = 0;
+  L.onClose = () => { closed++; };
+  L.connect();
+  socks[0].readyState = 1;
+  socks[0].onclose();
+  assert.equal(closed, 1);
+  assert.equal(L.isConnected(), false);
+});
+
 function loadBackground(connected) {
-  let listener, clicked;
+  let listener;
   const sent = [];
   const ctx = vm.createContext({
     console, Promise,
     browser: {
       runtime: { onMessage: { addListener: (f) => (listener = f) } },
-      browserAction: { onClicked: { addListener: (f) => (clicked = f) } },
     },
     SCHandlers: { watch() {}, handle() {} },
+    SCChat: { clearSitesOnce() {} },
     SCLink: {
       connect() {},
       sendEvent(n, d) { if (!connected) return false; sent.push([n, d]); return true; },
     },
   });
   vm.runInContext(readFileSync("extension/background.js", "utf8"), ctx);
-  return { listener, sent, clicked: () => clicked() };
+  return { listener, sent };
 }
 
 test("backgroundStopConnected", async () => {
@@ -64,10 +76,4 @@ test("backgroundStopDisconnected", async () => {
 test("backgroundIgnoresOtherMessages", () => {
   const { listener } = loadBackground(true);
   assert.equal(listener({ x: 1 }), undefined);
-});
-
-test("toolbarButtonSendsStop", () => {
-  const { clicked, sent } = loadBackground(true);
-  clicked();
-  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["stop", {}]]);
 });
