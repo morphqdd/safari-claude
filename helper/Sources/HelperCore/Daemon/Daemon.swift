@@ -95,6 +95,10 @@ public final class Daemon {
         case (.extension_, .req(let id, _, _)):
             send(client.conn, .res(id: id, result: nil, error: .badRequest("extension cannot send requests")))
         case (.mcp, .req(let id, let method, let params)):
+            if method == "status" {
+                send(client.conn, .res(id: id, result: .object(["extensionConnected": .bool(ext != nil)]), error: nil))
+                return
+            }
             guard method == "tool.call" else {
                 send(client.conn, .res(id: id, result: nil, error: .badRequest("unknown method \(method)")))
                 return

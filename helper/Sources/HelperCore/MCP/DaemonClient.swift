@@ -18,13 +18,21 @@ public final class DaemonClient: @unchecked Sendable {
     }
 
     public func call(_ name: String, _ args: JSON) async throws -> JSON {
+        try await request("tool.call", .object(["name": .string(name), "arguments": args]))
+    }
+
+    /// Asks the daemon whether the Safari extension is currently connected.
+    public func extensionConnected() async throws -> Bool {
+        try await request("status", .object([:]))["extensionConnected"]?.bool ?? false
+    }
+
+    private func request(_ method: String, _ params: JSON) async throws -> JSON {
         let id = lock.withLock { () -> Int in defer { nextId += 1 }; return nextId }
         let timedOut = lock.withLock { Flag() }
         do {
             return try await withTimeout(timedOut) { [self] in
                 let ws = try await connectedTask()
-                try await send(ws, .req(id: id, method: "tool.call",
-                                        params: .object(["name": .string(name), "arguments": args])))
+                try await send(ws, .req(id: id, method: method, params: params))
                 while true {
                     let m = try await receive(ws)
                     guard case .res(let rid, let result, let error) = m, rid == id else { continue }

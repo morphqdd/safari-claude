@@ -1,11 +1,6 @@
 import Foundation
 import HelperCore
 
-func notImplemented(_ name: String) -> Never {
-    FileHandle.standardError.write(Data("\(name): not implemented\n".utf8))
-    exit(1)
-}
-
 func runDaemon() -> Never {
     var devPort: UInt16?
     let args = Array(CommandLine.arguments.dropFirst(2))
@@ -44,9 +39,24 @@ func runMCP() -> Never {
     }
     dispatchMain()
 }
-func runInstall() -> Never { notImplemented("install") }
-func runUninstall() -> Never { notImplemented("uninstall") }
-func runStatus() -> Never { notImplemented("status") }
+func runInstall() -> Never {
+    do { try Installer.install(binarySource: URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL.resolvingSymlinksInPath()) }
+    catch { FileHandle.standardError.write(Data("install: \(error)\n".utf8)); exit(1) }
+    exit(0)
+}
+func runUninstall() -> Never {
+    do { try Installer.uninstall() }
+    catch { FileHandle.standardError.write(Data("uninstall: \(error)\n".utf8)); exit(1) }
+    exit(0)
+}
+func runStatus() -> Never {
+    if CommandLine.arguments.contains("--check-ax") {
+        print(Installer.axTrusted() ? "trusted" : "not trusted")
+    } else {
+        print(Installer.status())
+    }
+    exit(0)
+}
 
 let usage = "usage: safari-claude-helper <daemon|mcp|install|uninstall|status>\n"
 
