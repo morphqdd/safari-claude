@@ -13,14 +13,17 @@ async function page(stored) {
   w.eval(readFileSync("extension/chat/chat.js", "utf8"));
   const store = stored ? { "sc.chat": j(stored) } : {};
   const sent = [];
-  let onMsg;
-  const port = {
-    postMessage: (m) => sent.push(j(m)),
-    onMessage: { addListener: (f) => { onMsg = f; } },
-    onDisconnect: { addListener() {} },
-  };
+  let onMsg, onDis, connects = 0;
   const browser = {
-    runtime: { connect: (o) => { assert.equal(o.name, "chat"); return port; } },
+    runtime: { connect: (o) => {
+      assert.equal(o.name, "chat");
+      connects++;
+      return {
+        postMessage: (m) => sent.push(j(m)),
+        onMessage: { addListener: (f) => { onMsg = f; } },
+        onDisconnect: { addListener: (f) => { onDis = f; } },
+      };
+    } },
     storage: { local: {
       get: async (k) => (k in store ? { [k]: j(store[k]) } : {}),
       set: async (o) => void Object.assign(store, j(o)),
@@ -36,7 +39,8 @@ async function page(stored) {
     $("#input").dispatchEvent(e);
     return e;
   };
-  return { w, d, $, store, sent, push, type, key };
+  const drop = async () => { onDis(); await tick(); };
+  return { drop, connects: () => connects, w, d, $, store, sent, push, type, key };
 }
 
 test("sendPostsMessageAndDisablesInput", async () => {
@@ -195,4 +199,39 @@ test("modelTextIsNotParsedAsHTML", async () => {
   await p.push({ type: "confirm", id: "c1", kind: "type", host: "<i>h</i>", text: "<script>x</script>" });
   assert.equal(p.d.querySelectorAll("#log img, #log b, #log i, #log script").length, 0);
   assert.equal(p.$(".assistant").textContent, "<img src=x onerror=alert(1)><b>hi</b>");
+});
+
+test("restoreDropsInvalidEntries", async () => {
+  const p = await page({ entries: [
+    { kind: "user", text: "ok" },
+    { kind: "x y\" onclick=", text: "bad" },
+    { kind: "assistant", text: 5 },
+    null,
+    { kind: "notice", text: "n" },
+  ] });
+  assert.equal(p.d.querySelectorAll("#log > div").length, 2);
+  assert.equal(p.$(".user").textContent, "ok");
+  assert.equal(p.$(".notice").textContent, "n");
+});
+
+test("portDisconnectReconnectsAndEndsWaiting", async () => {
+  const p = await page();
+  await p.type("x");
+  p.key("Enter");
+  await tick();
+  await p.drop();
+  assert.equal(p.connects(), 2);
+  assert.match(p.$(".error").textContent, /Связь с расширением прервалась/);
+  assert.equal(p.$("#send").disabled, false);
+  await p.drop();
+  assert.equal(p.connects(), 3);
+  assert.equal(p.d.querySelectorAll(".error").length, 1);
+});
+
+test("deltasAreSavedOnTurnEndNotPerToken", async () => {
+  const p = await page();
+  await p.push({ type: "delta", text: "a" });
+  assert.equal(p.store["sc.chat"], undefined);
+  await p.push({ type: "turnEnd" });
+  assert.equal(p.store["sc.chat"].entries[0].text, "a");
 });

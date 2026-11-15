@@ -1,6 +1,8 @@
 // Chat window page: transcript, input, confirmation cards. All text goes in via textContent.
 (() => {
   const KEY = "sc.chat";
+  const KINDS = ["user", "assistant", "action", "notice", "error"];
+  const LOST = "Связь с расширением прервалась";
   const BUSY = "Занято другой сессией";
 
   const SITE = [["once", "Один раз"], ["always", "Всегда"], ["no", "Нет"]];
@@ -61,12 +63,22 @@
       const got = await browser.storage.local.get(KEY);
       const saved = got?.[KEY]?.entries;
       if (Array.isArray(saved)) {
-        entries = saved.filter((e) => e && typeof e.text === "string");
+        entries = saved
+          .filter((e) => e && KINDS.includes(e.kind) && typeof e.text === "string")
+          .map((e) => ({ kind: e.kind, text: e.text }));
         for (const e of entries) line(e.kind, e.text);
       }
     } catch { /* start empty */ }
 
-    const port = browser.runtime.connect({ name: "chat" });
+    let port;
+    function connect() {
+      port = browser.runtime.connect({ name: "chat" });
+      port.onMessage.addListener(onMessage);
+      port.onDisconnect.addListener(() => {
+        if (waiting) { add("error", LOST); setWaiting(false); }
+        connect(); // the background re-sends pending cards on connect
+      });
+    }
 
     function submit() {
       const text = input.value.trim();
@@ -120,7 +132,7 @@
       stick();
     }
 
-    port.onMessage.addListener((m) => {
+    function onMessage(m) {
       switch (m?.type) {
         case "delta":
           if (!current) {
@@ -131,17 +143,17 @@
           current.text += String(m.text ?? "");
           currentEl.textContent = current.text;
           stick();
-          save();
           break;
         case "action": add("action", `· ${describe(m.tool, m.input)}`); break;
         case "notice": add("notice", String(m.text ?? "")); break;
         case "error": add("error", String(m.text ?? "")); setWaiting(false); break;
         case "busy": add("error", BUSY); setWaiting(false); break;
-        case "turnEnd": current = null; setWaiting(false); break;
+        case "turnEnd": current = null; setWaiting(false); save(); break;
         case "confirm": showCard(m); break;
         case "cardClosed": closeCard(m.id, "Отказано"); break;
       }
-    });
+    }
+    connect();
 
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
