@@ -23,6 +23,8 @@ public final class ChatSession {
     private let sessionFile: URL
     private let workspace: URL
     private var idleMonitor: IdleMonitor!
+    /// Kills claude if it does not end an interrupted turn within `interruptGrace`.
+    private var interruptMonitor: IdleMonitor!
 
     private var process: ClaudeProcess?
     public private(set) var chatKey: String?
@@ -37,7 +39,7 @@ public final class ChatSession {
 
     /// `sessionFile` and `workspace` override `Paths.chatSession` / `Paths.workspace` (tests avoid the global `Paths.root`).
     public init(queue: DispatchQueue, launcher: @escaping ClaudeLauncher, claudePath: String, helperPath: String,
-                idle: TimeInterval = 300, emit: @escaping (ChatEvent) -> Void,
+                idle: TimeInterval = 300, interruptGrace: TimeInterval = 5, emit: @escaping (ChatEvent) -> Void,
                 sessionFile: URL? = nil, workspace: URL? = nil) {
         self.queue = queue
         self.launcher = launcher
@@ -47,6 +49,12 @@ public final class ChatSession {
         self.sessionFile = sessionFile ?? Paths.chatSession
         self.workspace = workspace ?? Paths.workspace
         idleMonitor = IdleMonitor(queue: queue, delay: idle) { [weak self] in self?.stop() }
+        interruptMonitor = IdleMonitor(queue: queue, delay: interruptGrace) { [weak self] in
+            // The next send resumes the conversation in a new process.
+            guard let self, self.turnActive else { return }
+            self.stop()
+            self.endTurn()
+        }
     }
 
     public func send(_ text: String) throws {
@@ -68,6 +76,7 @@ public final class ChatSession {
         interruptSent = true
         // claude answers with an error `result` and stays alive; that result ends the turn.
         process.write(StreamJSON.interruptLine(id: UUID().uuidString))
+        interruptMonitor.arm()
     }
 
     public func reset() {
@@ -90,26 +99,27 @@ public final class ChatSession {
         if let resume { args += ["--resume", resume] }
         var env = ProcessInfo.processInfo.environment.filter { ["HOME", "USER", "PATH"].contains($0.key) }
         env["SC_CHAT_KEY"] = key
-        let p: ClaudeProcess
         do {
             let config = try writeConfig(key: key)
             args[args.firstIndex(of: "--mcp-config")! + 1] = config.path
-            p = try launcher(args, env, workspace)
+            let p = try launcher(args, env, workspace)
+            // Callbacks hop to `queue`, so they run after this method; set before start so none is missed.
+            p.onLine = { [weak self, weak p] line in
+                self?.queue.async { if let p { self?.handle(line, from: p) } }
+            }
+            p.onExit = { [weak self, weak p] code in
+                self?.queue.async { if let p { self?.exited(code, p) } }
+            }
+            try p.start()
+            process = p
+            chatKey = key
+            awaitingResume = resume != nil
+            return true
         } catch {
             emit(.error("Не найден claude: \(claudePath)"))
             endTurn()
             return false
         }
-        p.onLine = { [weak self, weak p] line in
-            self?.queue.async { if let p { self?.handle(line, from: p) } }
-        }
-        p.onExit = { [weak self, weak p] code in
-            self?.queue.async { if let p { self?.exited(code, p) } }
-        }
-        process = p
-        chatKey = key
-        awaitingResume = resume != nil
-        return true
     }
 
     /// Terminates the process deliberately (idle, reset, failed resume); its exit is then ignored.
@@ -164,6 +174,7 @@ public final class ChatSession {
     }
 
     private func endTurn() {
+        interruptMonitor.disarm()
         turnActive = false
         interruptSent = false
         pending = nil

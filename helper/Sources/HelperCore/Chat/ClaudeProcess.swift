@@ -1,11 +1,13 @@
 import Foundation
 
-/// A running `claude`. Callbacks may arrive on any thread; `ChatSession` hops to its queue.
+/// A `claude` process. The launcher only prepares it; `start()` runs it once `onLine`/`onExit` are set,
+/// so nothing it prints (or its exit) can be missed. Callbacks may arrive on any thread; `ChatSession` hops to its queue.
 public protocol ClaudeProcess: AnyObject {
     var onLine: ((String) -> Void)? { get set }
     var onExit: ((Int32) -> Void)? { get set }
     /// Last bytes of stderr, for the error shown when the process dies mid-turn.
     var stderrTail: String { get }
+    func start() throws
     func write(_ line: String)
     func terminate()
 }
@@ -59,13 +61,15 @@ public final class RealClaudeProcess: ClaudeProcess {
                 guard let self else { return }
                 self.stdout.fileHandleForReading.readabilityHandler = nil
                 self.stderr.fileHandleForReading.readabilityHandler = nil
+                self.appendErr(Self.drain(self.stderr.fileHandleForReading.fileDescriptor))
                 self.consume(self.stdout.fileHandleForReading.readDataToEndOfFile())
                 if !self.buffer.isEmpty { self.deliver(self.buffer); self.buffer.removeAll() }
                 self.onExit?(status)
             }
         }
-        try process.run()
     }
+
+    public func start() throws { try process.run() }
 
     public var stderrTail: String { io.sync { String(decoding: errTail, as: UTF8.self) } }
 
@@ -89,6 +93,19 @@ public final class RealClaudeProcess: ClaudeProcess {
 
     private func deliver(_ line: Data) {
         if !line.isEmpty { onLine?(String(decoding: line, as: UTF8.self)) }
+    }
+
+    /// What stderr holds right now, without waiting for EOF (an MCP child may still hold the pipe open).
+    private static func drain(_ fd: Int32) -> Data {
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        var out = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = read(fd, &buf, buf.count)
+            if n <= 0 { break }
+            out.append(contentsOf: buf[0..<n])
+        }
+        return out
     }
 
     private func appendErr(_ data: Data) {

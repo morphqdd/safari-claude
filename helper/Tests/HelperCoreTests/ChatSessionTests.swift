@@ -8,6 +8,15 @@ final class FakeClaude: ClaudeProcess {
     var stderrTail = ""
     var written: [String] = []
     var terminated = false
+    var started = false
+    var startError: Error?
+    /// Runs inside `start()`, e.g. to emit output before `start()` returns.
+    var onStart: ((FakeClaude) -> Void)?
+    func start() throws {
+        if let startError { throw startError }
+        started = true
+        onStart?(self)
+    }
     func write(_ line: String) { written.append(line) }
     func terminate() { terminated = true }
 }
@@ -24,17 +33,23 @@ final class ChatHarness {
     var processes: [FakeClaude] = []
     var events: [ChatEvent] = []
     var failLaunch = false
+    var failStart = false
+    /// Behaviour of each new process on `start()`; the Int is the launch index.
+    var onStart: ((Int, FakeClaude) -> Void)?
     var session: ChatSession!
 
-    init(idle: TimeInterval = 300) {
+    init(idle: TimeInterval = 300, interruptGrace: TimeInterval = 5) {
         session = ChatSession(queue: queue, launcher: { [unowned self] args, env, cwd in
             if self.failLaunch { throw CocoaError(.fileNoSuchFile) }
             self.launches.append(Launch(arguments: args, environment: env, cwd: cwd))
             let p = FakeClaude()
+            if self.failStart { p.startError = CocoaError(.fileNoSuchFile) }
+            let index = self.launches.count - 1
+            p.onStart = { self.onStart?(index, $0) }
             self.processes.append(p)
             return p
         }, claudePath: "/opt/claude", helperPath: "/h/safari-claude-helper", idle: idle,
-           emit: { [unowned self] in self.events.append($0) },
+           interruptGrace: interruptGrace, emit: { [unowned self] in self.events.append($0) },
            sessionFile: sessionFile, workspace: workspace)
     }
 
@@ -202,6 +217,32 @@ private func eventually(_ timeout: TimeInterval = 2, _ cond: () -> Bool) async -
         #expect(h.on { !h.session.turnActive && !h.session.isRunning })
     }
 
+    @Test func missingBinaryOnStartEmitsError() throws {
+        let h = ChatHarness()
+        h.failStart = true
+        try h.send("x")
+        #expect(h.events == [.error("Не найден claude: /opt/claude"), .turnEnd])
+        #expect(h.on { !h.session.turnActive && !h.session.isRunning && h.session.chatKey == nil })
+    }
+
+    @Test func outputAndExitDuringStartAreNotLost() throws {
+        let h = ChatHarness()
+        try h.saveSession("gone")
+        // The first process fails the resume and exits before `start()` even returns.
+        h.onStart = { i, p in
+            guard i == 0 else { return }
+            p.onLine?(noConversationLine)
+            p.onExit?(1)
+        }
+        try h.send("x")
+        h.on {}
+        #expect(h.processes.allSatisfy { $0.started })
+        #expect(h.events == [.notice("Предыдущий диалог недоступен, начат новый")])
+        #expect(h.launches.count == 2 && !h.launches[1].arguments.contains("--resume"))
+        #expect(h.last.written == [StreamJSON.userLine("x")])
+        #expect(h.on { h.session.turnActive && h.session.isRunning })
+    }
+
     @Test func exitMidTurnEmitsErrorAndTurnEnd() throws {
         let h = ChatHarness()
         try h.send("x")
@@ -245,6 +286,36 @@ private func eventually(_ timeout: TimeInterval = 2, _ cond: () -> Bool) async -
         h.on { h.session.interrupt() }
         #expect(h.last.written.count == 2)
         #expect(h.events == [.turnEnd])
+    }
+
+    @Test func interruptWithoutResultTerminatesAfterGrace() async throws {
+        let h = ChatHarness(interruptGrace: 0.05)
+        try h.send("x")
+        h.feed(initLine)
+        let p = h.last
+        h.on { h.session.interrupt() }
+        #expect(await eventually { p.terminated })
+        #expect(h.events == [.turnEnd])
+        #expect(h.on { !h.session.turnActive && !h.session.isRunning })
+        // Late output of the killed process is ignored.
+        h.feed(interruptedLine, to: p)
+        h.exit(143, p)
+        #expect(h.events == [.turnEnd])
+        // The next send resumes the conversation in a new process.
+        try h.send("y")
+        #expect(h.value(after: "--resume", in: h.launches[1].arguments) == "sess-1")
+    }
+
+    @Test func timelyInterruptResultCancelsGrace() async throws {
+        let h = ChatHarness(interruptGrace: 0.05)
+        try h.send("x")
+        h.feed(initLine)
+        h.on { h.session.interrupt() }
+        h.feed(interruptedLine)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        #expect(!h.last.terminated)
+        #expect(h.events == [.turnEnd])
+        #expect(h.on { h.session.isRunning })
     }
 
     @Test func resetDeletesSession() throws {
@@ -306,6 +377,7 @@ private func eventually(_ timeout: TimeInterval = 2, _ cond: () -> Bool) async -
                                       cwd: FileManager.default.temporaryDirectory)
         p.onLine = { l in box.lock.lock(); box.lines.append(l); box.lock.unlock() }
         p.onExit = { c in box.lock.lock(); box.exit = c; box.linesAtExit = box.lines.count; box.lock.unlock() }
+        try p.start()
         p.write(#"{"x":1}"#)
         let end = Date().addingTimeInterval(5)
         while Date() < end, box.lock.withLock({ box.exit == nil }) { try await Task.sleep(nanoseconds: 10_000_000) }
@@ -317,9 +389,26 @@ private func eventually(_ timeout: TimeInterval = 2, _ cond: () -> Bool) async -
         #expect(p.stderrTail.contains("oops"))
     }
 
-    @Test func missingBinaryThrows() {
-        #expect(throws: (any Error).self) {
-            try RealClaudeProcess(arguments: ["/nonexistent/claude"], environment: [:], cwd: FileManager.default.temporaryDirectory)
+    @Test func immediateOutputAndExitAreNotLost() async throws {
+        for _ in 0..<20 {
+            let box = Box()
+            let p = try RealClaudeProcess(arguments: ["/bin/sh", "-c", "echo hi; echo err >&2; exit 4"],
+                                          environment: [:], cwd: FileManager.default.temporaryDirectory)
+            p.onLine = { l in box.lock.lock(); box.lines.append(l); box.lock.unlock() }
+            p.onExit = { c in box.lock.lock(); box.exit = c; box.linesAtExit = box.lines.count; box.lock.unlock() }
+            try p.start()
+            let end = Date().addingTimeInterval(5)
+            while Date() < end, box.lock.withLock({ box.exit == nil }) { try await Task.sleep(nanoseconds: 5_000_000) }
+            box.lock.withLock {
+                #expect(box.exit == 4)
+                #expect(box.lines == ["hi"] && box.linesAtExit == 1)
+            }
+            #expect(p.stderrTail == "err\n")
         }
+    }
+
+    @Test func missingBinaryThrowsOnStart() throws {
+        let p = try RealClaudeProcess(arguments: ["/nonexistent/claude"], environment: [:], cwd: FileManager.default.temporaryDirectory)
+        #expect(throws: (any Error).self) { try p.start() }
     }
 }
