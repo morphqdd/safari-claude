@@ -25,7 +25,31 @@ func runDaemon() -> Never {
         exit(1)
     }
 }
-func runMCP() -> Never { notImplemented("mcp") }
+func runMCP() -> Never {
+    var port: UInt16 = 47821
+    let args = Array(CommandLine.arguments.dropFirst(2))
+    if let i = args.firstIndex(of: "--port"), i + 1 < args.count, let p = UInt16(args[i + 1]) { port = p }
+    let token: String
+    do { token = try Auth().loadOrCreateToken() } catch {
+        FileHandle.standardError.write(Data("mcp: cannot load token: \(error)\n".utf8))
+        exit(1)
+    }
+    let client = DaemonClient(port: port, token: token)
+    let server = MCPServer(forward: { name, args in try await client.call(name, args) })
+    Task {
+        do {
+            for try await line in FileHandle.standardInput.bytes.lines where !line.isEmpty {
+                if let reply = await server.handle(line: line) {
+                    FileHandle.standardOutput.write(Data((reply + "\n").utf8))
+                }
+            }
+        } catch {
+            FileHandle.standardError.write(Data("mcp: stdin error: \(error)\n".utf8))
+        }
+        exit(0)
+    }
+    dispatchMain()
+}
 func runInstall() -> Never { notImplemented("install") }
 func runUninstall() -> Never { notImplemented("uninstall") }
 func runStatus() -> Never { notImplemented("status") }

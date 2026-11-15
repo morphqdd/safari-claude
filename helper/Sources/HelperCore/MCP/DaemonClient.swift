@@ -1,0 +1,89 @@
+import Foundation
+
+/// WebSocket client to the helper daemon. Connects lazily (which wakes the daemon via launchd)
+/// and reconnects on the next call after a failure. Calls are expected to be sequential.
+public final class DaemonClient: @unchecked Sendable {
+    private let port: UInt16
+    private let token: String
+    private let timeout: TimeInterval
+    private let session = URLSession(configuration: .ephemeral)
+    private var task: URLSessionWebSocketTask?
+    private var nextId = 1
+    private let lock = NSLock()
+
+    public init(port: UInt16 = 47821, token: String, timeout: TimeInterval = 120) {
+        self.port = port
+        self.token = token
+        self.timeout = timeout
+    }
+
+    public func call(_ name: String, _ args: JSON) async throws -> JSON {
+        let id = lock.withLock { () -> Int in defer { nextId += 1 }; return nextId }
+        do {
+            return try await withTimeout { [self] in
+                let ws = try await connectedTask()
+                try await send(ws, .req(id: id, method: "tool.call",
+                                        params: .object(["name": .string(name), "arguments": args])))
+                while true {
+                    let m = try await receive(ws)
+                    guard case .res(let rid, let result, let error) = m, rid == id else { continue }
+                    if let error { throw error }
+                    return result ?? .null
+                }
+            }
+        } catch let e as RPCError {
+            throw e
+        } catch {
+            drop()
+            throw RPCError.internal("helper daemon unavailable: \(error)")
+        }
+    }
+
+    private func connectedTask() async throws -> URLSessionWebSocketTask {
+        let existing = lock.withLock { task }
+        if let existing { return existing }
+        let ws = session.webSocketTask(with: URL(string: "ws://127.0.0.1:\(port)")!)
+        ws.resume()
+        do {
+            try await send(ws, .hello(role: .mcp, token: token))
+            guard case .welcome = try await receive(ws) else {
+                throw RPCError.internal("unexpected handshake reply")
+            }
+        } catch {
+            ws.cancel(with: .goingAway, reason: nil)
+            throw error
+        }
+        lock.withLock { task = ws }
+        return ws
+    }
+
+    private func drop() {
+        let t = lock.withLock { () -> URLSessionWebSocketTask? in defer { task = nil }; return task }
+        t?.cancel(with: .goingAway, reason: nil)
+    }
+
+    private func send(_ ws: URLSessionWebSocketTask, _ m: Message) async throws {
+        let data = try JSONEncoder().encode(m)
+        try await ws.send(.string(String(decoding: data, as: UTF8.self)))
+    }
+
+    private func receive(_ ws: URLSessionWebSocketTask) async throws -> Message {
+        switch try await ws.receive() {
+        case .string(let s): return try JSONDecoder().decode(Message.self, from: Data(s.utf8))
+        case .data(let d): return try JSONDecoder().decode(Message.self, from: d)
+        @unknown default: throw RPCError.internal("unsupported frame")
+        }
+    }
+
+    private func withTimeout<T: Sendable>(_ op: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await op() }
+            group.addTask { [timeout] in
+                try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                throw RPCError.timeout("daemon did not reply within \(Int(timeout))s")
+            }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+    }
+}
