@@ -12,13 +12,13 @@
   const CONTENT_METHODS = new Set([
     "page.snapshot", "page.find", "page.text", "page.scroll",
     "el.prepare", "el.release", "el.submitRisk", "el.domClick", "el.focus",
-    "el.domType", "el.domKey", "el.value", "el.describe", "site.allow", "site.check", "overlay.status",
+    "el.domType", "el.domKey", "el.value", "el.describe", "site.allow", "site.check", "overlay.status", "overlay.capture",
   ]);
 
   // Safe to re-send: they only read page state (page.scroll and everything that acts is excluded).
   const IDEMPOTENT = new Set([
     "page.snapshot", "page.find", "page.text", "el.prepare", "el.release", "el.value", "el.describe",
-    "el.submitRisk", "site.check", "overlay.status",
+    "el.submitRisk", "site.check", "overlay.status", "overlay.capture",
   ]);
 
   function agent(deps) {
@@ -78,6 +78,7 @@
   }
 
   const NO_LOAD_MS = 3000;
+  const CAPTURE_HIDE_MS = 300;
 
   // `start()` performs the navigation and returns the tab id. The onUpdated listener is armed
   // first. Resolves after a `loading` (or url change) followed by `complete`; if no loading
@@ -223,7 +224,14 @@
         const id = agent(deps);
         const t = await browser.tabs.get(id);
         if (!t.active) throw err("background_tab", "\u0412\u043a\u043b\u0430\u0434\u043a\u0430 \u0430\u0433\u0435\u043d\u0442\u0430 \u0432 \u0444\u043e\u043d\u0435: \u0441\u043a\u0440\u0438\u043d\u0448\u043e\u0442 \u043d\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u0435\u043d");
-        return { dataUrl: await browser.tabs.captureVisibleTab(t.windowId, { format: "png" }) };
+        // The overlay is hidden for the capture; a page that does not answer within 300 ms is captured as is.
+        const overlay = (hidden) => toContent(deps, id, "overlay.capture", { hidden });
+        await Promise.race([overlay(true).catch(() => {}), new Promise((res) => setTimeout(res, CAPTURE_HIDE_MS))]);
+        try {
+          return { dataUrl: await browser.tabs.captureVisibleTab(t.windowId, { format: "png" }) };
+        } finally {
+          overlay(false).catch(() => {});
+        }
       }
       case "site.allowOnce": {
         const host = String(params.domain ?? "").toLowerCase();

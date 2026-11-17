@@ -1,4 +1,4 @@
-// Visual overlay: Claude cursor, element highlight, status bar with «Стоп».
+// Visual overlay: Claude cursor, element highlight, status bar with «Стоп» and «×» (hide).
 // Idle-zero: nothing is mounted until the first status/moveTo.
 (() => {
   const SC = (globalThis.SC ??= {});
@@ -29,6 +29,7 @@
     button { pointer-events: auto; cursor: pointer; border: 0; border-radius: 999px; padding: 3px 12px;
       background: ${COLOR}; color: #fff; font-size: 12px; font-weight: 600; }
     button:disabled { opacity: .5; cursor: default; }
+    button.hide { background: transparent; color: #aaa; padding: 3px 6px; font-size: 14px; }
     @media (prefers-reduced-motion: reduce) {
       .hl, .cur { transition: none; }
       .ring { animation: none; }
@@ -79,8 +80,36 @@
         stop.disabled = false;
       }
     });
+    const hide = mk("button", "hide", bar);
+    hide.textContent = "×";
+    hide.title = "Скрыть до конца работы агента";
+    hide.addEventListener("click", () => { st.dismissed = true; applyVisibility(); });
     document.documentElement.appendChild(host);
-    st = { host, hl, cur, label, stop, x: null, y: null, origTitle: document.title, timers: new Set(), pending: new Set(), stopped: false };
+    st = { host, hl, cur, label, stop, hide, x: null, y: null, origTitle: document.title, timers: new Set(), pending: new Set(),
+      stopped: false, dismissed: false, capturing: false };
+  }
+
+  // Hidden while a screenshot is taken or after the owner pressed «×» (until the session ends).
+  function applyVisibility() {
+    if (!st) return;
+    st.host.style.setProperty("visibility", st.dismissed || st.capturing ? "hidden" : "visible", "important");
+  }
+
+  // Resolves once the hidden overlay has been painted out (two frames; timer fallback if rAF is throttled).
+  function painted() {
+    return new Promise((res) => {
+      const t = setTimeout(res, 100);
+      const raf = window.requestAnimationFrame;
+      if (!raf) return;
+      raf(() => raf(() => { clearTimeout(t); res(); }));
+    });
+  }
+
+  function doCapture(hidden) {
+    if (!st) return Promise.resolve();
+    st.capturing = hidden;
+    applyVisibility();
+    return hidden ? painted() : Promise.resolve();
   }
 
   // Mounts on first use; re-attaches the host if the page removed it.
@@ -162,6 +191,8 @@
     status(text) { if (isTop) doStatus(text); },
     moveTo(el) { return isTop ? doMove(rectOf(el)) : Promise.resolve(); },
     pulse() { if (isTop) doPulse(); },
+    capture(hidden) { return isTop ? doCapture(!!hidden) : Promise.resolve(); },
     _stopButtonForTest() { return st?.stop ?? null; },
+    _dismissButtonForTest() { return st?.hide ?? null; },
   };
 })();

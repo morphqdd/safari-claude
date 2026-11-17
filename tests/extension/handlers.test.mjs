@@ -106,6 +106,43 @@ test("screenshotActiveTab", async () => {
   assert.deepEqual(j(fb.calls.capture[0]), [2, { format: "png" }]);
 });
 
+test("screenshotHidesOverlayDuringCapture", async () => {
+  const log = [];
+  const { H, deps, state, fb } = setup({ tabs: [{ id: 5, index: 0, active: true, windowId: 2 }] }, async (id, m) => {
+    log.push(`${m.method}:${m.params.hidden}`);
+    return {};
+  });
+  const capture = fb.browser.tabs.captureVisibleTab;
+  fb.browser.tabs.captureVisibleTab = async (...a) => { log.push("capture"); return capture(...a); };
+  state.agentTab = 5;
+  await H.handle("tab.screenshot", {}, deps);
+  await tick();
+  assert.deepEqual(log, ["overlay.capture:true", "capture", "overlay.capture:false"]);
+});
+
+test("screenshotRestoresOverlayWhenCaptureFails", async () => {
+  const log = [];
+  const { H, deps, state, fb } = setup({ tabs: [{ id: 5, index: 0, active: true, windowId: 2 }] }, async (id, m) => {
+    log.push(`${m.method}:${m.params.hidden}`);
+    return {};
+  });
+  fb.browser.tabs.captureVisibleTab = async () => { throw new Error("denied"); };
+  state.agentTab = 5;
+  await assert.rejects(H.handle("tab.screenshot", {}, deps));
+  await tick();
+  assert.deepEqual(log, ["overlay.capture:true", "overlay.capture:false"]);
+});
+
+test("screenshotDoesNotWaitForSilentPage", async () => {
+  const { H, deps, state, fb, timers } = setup({ tabs: [{ id: 5, index: 0, active: true, windowId: 2 }] }, () => new Promise(() => {}));
+  state.agentTab = 5;
+  const p = H.handle("tab.screenshot", {}, deps);
+  await tick();
+  timers.fire(300);
+  assert.deepEqual(await p, { dataUrl: "data:image/png;base64,AAA" });
+  assert.equal(fb.calls.capture.length, 1);
+});
+
 test("reinjectsOnNoReceiver", async () => {
   let n = 0;
   const { H, deps, state, fb } = setup({ tabs: [{ id: 5, index: 0, active: true }] }, async () => {

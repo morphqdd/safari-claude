@@ -154,3 +154,35 @@ test("overlayReattachedWhenPageRemovesIt", async () => {
   assert.ok(host(w));
   assert.equal(w.document.querySelectorAll("#__sc_overlay").length, 1);
 });
+
+const hidden = (w) => host(w).style.getPropertyValue("visibility") === "hidden";
+
+test("captureHidesAndRestores", async () => {
+  const { w } = load();
+  w.SC.overlay.status("Делаю снимок");
+  await w.SC.overlay.capture(true);
+  assert.ok(hidden(w));
+  await w.SC.overlay.capture(false);
+  assert.ok(!hidden(w));
+});
+
+test("captureWithoutOverlayDoesNotMount", async () => {
+  const { w } = load();
+  await w.SC.overlay.capture(true);
+  await w.SC.overlay.capture(false);
+  assert.equal(host(w), null);
+});
+
+test("dismissHidesUntilSessionEnds", async () => {
+  const { w } = load();
+  w.SC.overlay.status("Нажимаю e1");
+  w.SC.overlay._dismissButtonForTest().click();
+  assert.ok(hidden(w));
+  w.SC.overlay.status("Нажимаю e2");
+  await w.SC.overlay.capture(true);
+  await w.SC.overlay.capture(false);
+  assert.ok(hidden(w), "capture restore keeps a dismissed overlay hidden");
+  w.SC.overlay.status(null);
+  w.SC.overlay.status("Новая работа");
+  assert.ok(!hidden(w), "next session shows the overlay again");
+});
