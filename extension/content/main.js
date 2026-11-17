@@ -22,6 +22,7 @@
     "site.allow": async (p) => { await SC.sites.allow(p.domain); return {}; },
     "site.check": () => SC.checkSite(),
     "overlay.status": (p) => { SC.overlay?.status(p.text); return {}; },
+    "overlay.capture": async (p) => { await SC.overlay?.capture(p.hidden); return {}; },
     navigate: (p) => {
       if (p.action === "back") history.back();
       else if (p.action === "forward") history.forward();
